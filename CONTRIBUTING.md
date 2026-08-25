@@ -1,0 +1,22 @@
+# Contributing
+
+Contributions are welcome.
+
+## Development
+
+```sh
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+cargo test
+nix flake check
+```
+
+Keep changes focused and add tests for behavior. Do not add analytics, background network calls, credential output, or persistent identifiers without an explicit design decision and documentation.
+
+## Compatibility
+
+Supported release targets are listed in the README. Windows support is deferred and Windows-only changes should wait until maintainers establish a tested release target.
+
+## Security changes
+
+Use the private process in SECURITY.md instead of opening a pull request that demonstrates an exploitable vulnerability.

@@ -1,0 +1,33 @@
+name: Bug report
+description: Report reproducible CLI behavior
+body:
+  - type: markdown
+    attributes:
+      value: Do not include access tokens, device codes, private repository names, or email addresses. Report security issues privately as described in SECURITY.md.
+  - type: input
+    id: version
+    attributes:
+      label: co version
+      placeholder: Output of co version
+    validations: { required: true }
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options: [Linux, macOS]
+    validations: { required: true }
+  - type: textarea
+    id: steps
+    attributes:
+      label: Reproduction steps
+    validations: { required: true }
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations: { required: true }
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations: { required: true }
