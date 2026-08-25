@@ -2,7 +2,7 @@
 
 `co` is the human command-line client for [co.codes](https://co.codes).
 
-The current release supports browser-based device login, account inspection, repository metadata, and production diagnostics. Git clone and push remain disabled until the co.codes smart HTTP data plane is available; the CLI reports that limitation instead of fabricating a local or unusable remote.
+The current release supports browser-based device login, account inspection, repository metadata, Git clone and push authentication, and production diagnostics.
 
 ## Install
 
@@ -41,11 +41,16 @@ The installer defaults to `~/.local/bin`. Set `CO_INSTALL_DIR` to choose another
 co login
 co whoami
 co repo view OWNER/REPO
+co clone OWNER/REPO [DIRECTORY]
 co doctor
 co logout
 ```
 
 `co login` opens a browser for explicit device authorization. The local session is stored under the platform configuration directory with owner-only permissions. It is never written to Git configuration or passed as a command argument.
+
+`co clone` uses the canonical `https://git.co.codes/OWNER/REPO.git` remote. Private repository authentication uses HTTP Basic with username `co` and the existing session as its password. The clone receives the credential through a temporary helper command, then gets a URL-scoped local helper so ordinary `git fetch` and `git push` work. Git configuration stores the helper command, never the session token. Public repositories remain anonymously cloneable without a session.
+
+The helper is also available directly as `co git-credential get|store|erase`. It follows Git's credential protocol and returns credentials only for HTTPS requests to `git.co.codes` (with an optional default `:443` port).
 
 Set `CO_API_URL` to use a non-production API endpoint.
 
