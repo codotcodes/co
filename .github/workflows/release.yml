@@ -63,7 +63,7 @@ jobs:
           else
             (cd dist && shasum -a 256 "$asset" > "$asset.sha256")
           fi
-      - uses: actions/attest-build-provenance@v2
+      - uses: actions/attest-build-provenance@v4
         with:
           subject-path: dist/co-${{ matrix.target }}.tar.gz
       - uses: actions/upload-artifact@v4
