@@ -4,6 +4,8 @@ All notable changes are documented here. This project follows semantic versionin
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-08-26
+
 - Add authenticated `co clone` over the canonical co.codes smart HTTP URL.
 - Add a host-scoped Git credential helper backed by the existing CLI session.
 - Configure cloned repositories for authenticated fetch and push without storing tokens in Git configuration.
@@ -17,5 +19,6 @@ All notable changes are documented here. This project follows semantic versionin
 - Validate repository access in `clone` while smart HTTP remains unavailable.
 - Add Linux and macOS release packaging, Nix support, and the global installer.
 
-[Unreleased]: https://github.com/0xhckr/co/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/0xhckr/co/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/0xhckr/co/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/0xhckr/co/releases/tag/v0.1.0
