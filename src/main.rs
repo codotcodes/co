@@ -13,6 +13,7 @@ const DEFAULT_API_URL: &str = "https://api.co.codes";
 const GIT_HOST: &str = "git.co.codes";
 const DEVICE_CLIENT_ID: &str = "co-cli";
 const DEVICE_GRANT: &str = "urn:ietf:params:oauth:grant-type:device_code";
+const DEFAULT_UPSTREAM_NAME: &str = "origin";
 
 #[derive(Debug, Default, Deserialize, Serialize)]
 struct Config {
@@ -20,6 +21,18 @@ struct Config {
     api_url: Option<String>,
     #[serde(default)]
     session_token: Option<String>,
+    #[serde(default)]
+    upstream_name: Option<String>,
+    #[serde(default)]
+    jj: bool,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct RepoCommand {
+    spec: String,
+    directory: Option<String>,
+    upstream_name: String,
+    jj: bool,
 }
 
 #[derive(Deserialize)]
@@ -74,11 +87,14 @@ fn run(args: Vec<String>) -> Result<(), String> {
         "repo" if args.get(1).map(String::as_str) == Some("view") => {
             repo_view(required_arg(&args, 2, "usage: co repo view <owner/repo>")?)
         }
-        "clone" if (2..=3).contains(&args.len()) => clone_repo(
-            required_arg(&args, 1, "usage: co clone <owner/repo> [directory]")?,
-            args.get(2).map(String::as_str),
-        ),
-        "clone" => Err("usage: co clone <owner/repo> [directory]".into()),
+        "clone" => {
+            let config = load_config()?;
+            clone_repo(parse_repo_command(&args[1..], true, &config)?)
+        }
+        "link" => {
+            let config = load_config()?;
+            link_repo(parse_repo_command(&args[1..], false, &config)?)
+        }
         "repo" => Err("usage: co repo view <owner/repo>".into()),
         other => Err(format!("unknown command {other:?} (try: co help)")),
     }
@@ -97,11 +113,17 @@ fn help() {
     println!("  logout                   revoke the local session");
     println!("  whoami                   show the signed-in account");
     println!("  repo view <owner/repo>   show repository metadata");
-    println!("  clone <owner/repo> [dir] clone a repository over HTTPS");
+    println!("  clone [options] <repo>   clone a repository over HTTPS");
+    println!("  link [options] <repo>    link the local Git repository");
     println!("  git-credential <op>      serve credentials to Git");
     println!("  doctor                   check API and authentication");
     println!("  version                  print version");
     println!();
+    println!("Clone and link options:");
+    println!("  -u, --set-upstream-name <name>  set the Git remote name (default: origin)");
+    println!("      --jj / --no-jj              enable or disable colocated jj setup");
+    println!();
+    println!("Configuration: ~/.config/co/config.json (or $XDG_CONFIG_HOME/co/config.json).");
     println!("Environment: CO_API_URL overrides https://api.co.codes.");
 }
 
@@ -296,17 +318,130 @@ fn parse_credential(input: &str) -> GitCredential<'_> {
     credential
 }
 
-fn clone_repo(spec: &str, directory: Option<&str>) -> Result<(), String> {
-    let (_, name) = repo_spec(spec)?;
+fn parse_repo_command(
+    args: &[String],
+    allows_directory: bool,
+    config: &Config,
+) -> Result<RepoCommand, String> {
+    let command = if allows_directory { "clone" } else { "link" };
+    let usage = if allows_directory {
+        "usage: co clone [-u <name>] [--jj] <owner/repo> [directory]"
+    } else {
+        "usage: co link [-u <name>] [--jj] <owner/repo>"
+    };
+    let mut upstream_name = config
+        .upstream_name
+        .clone()
+        .unwrap_or_else(|| DEFAULT_UPSTREAM_NAME.into());
+    let mut jj = config.jj;
+    let mut positionals = Vec::new();
+    let mut options = true;
+    let mut index = 0;
+
+    while index < args.len() {
+        let argument = &args[index];
+        if options && argument == "--" {
+            options = false;
+        } else if options && matches!(argument.as_str(), "--jj" | "--no-jj") {
+            jj = argument == "--jj";
+        } else if options && matches!(argument.as_str(), "-u" | "--set-upstream-name") {
+            index += 1;
+            upstream_name = args
+                .get(index)
+                .cloned()
+                .ok_or_else(|| format!("{argument} requires a remote name\n{usage}"))?;
+        } else if options {
+            if let Some(value) = argument.strip_prefix("--set-upstream-name=") {
+                upstream_name = value.into();
+            } else if argument.starts_with('-') {
+                return Err(format!("unknown {command} option {argument:?}\n{usage}"));
+            } else {
+                positionals.push(argument.clone());
+            }
+        } else {
+            positionals.push(argument.clone());
+        }
+        index += 1;
+    }
+
+    let max_positionals = if allows_directory { 2 } else { 1 };
+    if positionals.is_empty() || positionals.len() > max_positionals {
+        return Err(usage.into());
+    }
+    repo_spec(&positionals[0])?;
+    validate_upstream_name(&upstream_name)?;
+
+    Ok(RepoCommand {
+        spec: positionals.remove(0),
+        directory: positionals.pop(),
+        upstream_name,
+        jj,
+    })
+}
+
+fn validate_upstream_name(name: &str) -> Result<(), String> {
+    if name.is_empty()
+        || name.starts_with('-')
+        || name.ends_with(['.', '/'])
+        || ["..", "@{", "//"].iter().any(|part| name.contains(part))
+        || name
+            .chars()
+            .any(|character| character.is_control() || " ~^:?*[\\".contains(character))
+        || name.split('/').any(|component| {
+            component.is_empty() || component.starts_with('.') || component.ends_with(".lock")
+        })
+    {
+        return Err(format!("{name:?} is not a valid Git remote name"));
+    }
+    Ok(())
+}
+
+fn clone_repo(command: RepoCommand) -> Result<(), String> {
+    let (_, name) = repo_spec(&command.spec)?;
     let executable = std::env::current_exe()
         .map_err(|error| format!("unable to locate the co executable: {error}"))?;
     let helper = credential_helper(&executable)?;
-    let url = git_url(spec);
-    let clone_args = clone_command_args(&url, directory, &helper);
+    let url = git_url(&command.spec);
+    let clone_args = clone_command_args(
+        &url,
+        command.directory.as_deref(),
+        &command.upstream_name,
+        &helper,
+    );
     run_git(&clone_args, "clone repository")?;
 
-    let destination = directory.map(PathBuf::from).unwrap_or_else(|| name.into());
-    configure_repo_helper(&destination, &helper)
+    let destination = command
+        .directory
+        .map(PathBuf::from)
+        .unwrap_or_else(|| name.into());
+    configure_repo_helper(&destination, &helper)?;
+    if command.jj {
+        initialize_jj(&destination)?;
+    }
+    Ok(())
+}
+
+fn link_repo(command: RepoCommand) -> Result<(), String> {
+    let executable = std::env::current_exe()
+        .map_err(|error| format!("unable to locate the co executable: {error}"))?;
+    let helper = credential_helper(&executable)?;
+    let root = git_repo_root()?;
+    run_git(
+        &[
+            "-C".into(),
+            path_string(&root, "Git repository root")?,
+            "remote".into(),
+            "add".into(),
+            command.upstream_name,
+            git_url(&command.spec),
+        ],
+        "link repository",
+    )?;
+    configure_repo_helper(&root, &helper)?;
+    if command.jj {
+        initialize_jj(&root)?;
+    }
+    Ok(())
 }
 
 fn git_url(spec: &str) -> String {
@@ -324,13 +459,20 @@ fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
 
-fn clone_command_args(url: &str, directory: Option<&str>, helper: &str) -> Vec<String> {
+fn clone_command_args(
+    url: &str,
+    directory: Option<&str>,
+    upstream_name: &str,
+    helper: &str,
+) -> Vec<String> {
     let mut args = vec![
         "-c".into(),
         "credential.helper=".into(),
         "-c".into(),
         format!("credential.https://{GIT_HOST}.helper={helper}"),
         "clone".into(),
+        "--origin".into(),
+        upstream_name.into(),
         "--".into(),
         url.into(),
     ];
@@ -338,6 +480,66 @@ fn clone_command_args(url: &str, directory: Option<&str>, helper: &str) -> Vec<S
         args.push(directory.into());
     }
     args
+}
+
+fn initialize_jj(directory: &Path) -> Result<(), String> {
+    if directory.join(".jj").exists() {
+        let output = Command::new("jj")
+            .arg("--repository")
+            .arg(directory)
+            .arg("root")
+            .output()
+            .map_err(|error| format!("unable to inspect existing jj repository: {error}"))?;
+        if output.status.success() {
+            return Ok(());
+        }
+    }
+    let status = Command::new("jj")
+        .args(["git", "init", "--colocate"])
+        .current_dir(directory)
+        .status()
+        .map_err(|error| format!("unable to initialize jj: {error}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "jj failed to initialize a colocated repository ({status})"
+        ))
+    }
+}
+
+fn git_repo_root() -> Result<PathBuf, String> {
+    let bare = Command::new("git")
+        .args(["rev-parse", "--is-bare-repository"])
+        .output()
+        .map_err(|error| format!("unable to locate the Git repository: {error}"))?;
+    if !bare.status.success() {
+        return Err("the current directory is not inside a Git repository".into());
+    }
+    let is_bare = bare.stdout.starts_with(b"true");
+    let root_arg = if is_bare {
+        "--absolute-git-dir"
+    } else {
+        "--show-toplevel"
+    };
+    let output = Command::new("git")
+        .args(["rev-parse", root_arg])
+        .output()
+        .map_err(|error| format!("unable to locate the Git repository: {error}"))?;
+    if !output.status.success() {
+        return Err("the current directory is not inside a Git repository".into());
+    }
+    let root = String::from_utf8(output.stdout)
+        .map_err(|_| "the Git repository path is not valid UTF-8")?;
+    let root = root.strip_suffix('\n').unwrap_or(&root);
+    let root = root.strip_suffix('\r').unwrap_or(root);
+    Ok(PathBuf::from(root))
+}
+
+fn path_string(path: &Path, label: &str) -> Result<String, String> {
+    path.to_str()
+        .map(str::to_owned)
+        .ok_or_else(|| format!("the {label} is not valid UTF-8"))
 }
 
 fn configure_repo_helper(directory: &Path, helper: &str) -> Result<(), String> {
@@ -587,6 +789,7 @@ mod tests {
             clone_command_args(
                 "https://git.co.codes/hackr/co.git",
                 Some("checkout"),
+                "upstream",
                 helper
             ),
             vec![
@@ -595,10 +798,77 @@ mod tests {
                 "-c",
                 "credential.https://git.co.codes.helper=!'/usr/local/bin/co' git-credential",
                 "clone",
+                "--origin",
+                "upstream",
                 "--",
                 "https://git.co.codes/hackr/co.git",
                 "checkout",
             ]
+        );
+    }
+
+    #[test]
+    fn parses_clone_and_link_options_with_config_defaults() {
+        let config = Config {
+            upstream_name: Some("co".into()),
+            jj: true,
+            ..Config::default()
+        };
+        assert_eq!(
+            parse_repo_command(&["hackr/co".into(), "checkout".into()], true, &config).unwrap(),
+            RepoCommand {
+                spec: "hackr/co".into(),
+                directory: Some("checkout".into()),
+                upstream_name: "co".into(),
+                jj: true,
+            }
+        );
+        assert!(
+            !parse_repo_command(&["--no-jj".into(), "hackr/co".into()], false, &config)
+                .unwrap()
+                .jj
+        );
+        assert_eq!(
+            parse_repo_command(
+                &[
+                    "--jj".into(),
+                    "-u".into(),
+                    "mirror".into(),
+                    "hackr/co".into(),
+                ],
+                false,
+                &Config::default(),
+            )
+            .unwrap(),
+            RepoCommand {
+                spec: "hackr/co".into(),
+                directory: None,
+                upstream_name: "mirror".into(),
+                jj: true,
+            }
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_repo_command_options() {
+        let config = Config::default();
+        assert!(parse_repo_command(&["--wat".into(), "hackr/co".into()], true, &config).is_err());
+        assert!(parse_repo_command(&["-u".into(), "hackr/co".into()], true, &config).is_err());
+        assert!(
+            parse_repo_command(
+                &["--set-upstream-name=-bad".into(), "hackr/co".into()],
+                false,
+                &config,
+            )
+            .is_err()
+        );
+        assert!(
+            parse_repo_command(
+                &["--set-upstream-name=bad..name".into(), "hackr/co".into()],
+                false,
+                &config,
+            )
+            .is_err()
         );
     }
 
@@ -615,6 +885,8 @@ mod tests {
         let config = Config {
             api_url: Some("https://example.test/".into()),
             session_token: None,
+            upstream_name: None,
+            jj: false,
         };
         assert_eq!(api_url(&config), "https://example.test");
     }

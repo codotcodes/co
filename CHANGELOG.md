@@ -7,6 +7,8 @@ All notable changes are documented here. This project follows semantic versionin
 - Add authenticated `co clone` over the canonical co.codes smart HTTP URL.
 - Add a host-scoped Git credential helper backed by the existing CLI session.
 - Configure cloned repositories for authenticated fetch and push without storing tokens in Git configuration.
+- Add `co link` for connecting an existing local repository to co.codes.
+- Add configurable upstream names and optional colocated jj initialization to clone and link.
 
 ## [0.1.0] - 2026-08-25
 

@@ -41,18 +41,30 @@ The installer defaults to `~/.local/bin`. Set `CO_INSTALL_DIR` to choose another
 co login
 co whoami
 co repo view OWNER/REPO
-co clone OWNER/REPO [DIRECTORY]
+co clone [OPTIONS] OWNER/REPO [DIRECTORY]
+co link [OPTIONS] OWNER/REPO
 co doctor
 co logout
 ```
 
 `co login` opens a browser for explicit device authorization. The local session is stored under the platform configuration directory with owner-only permissions. It is never written to Git configuration or passed as a command argument.
 
-`co clone` uses the canonical `https://git.co.codes/OWNER/REPO.git` remote. Private repository authentication uses HTTP Basic with username `co` and the existing session as its password. The clone receives the credential through a temporary helper command, then gets a URL-scoped local helper so ordinary `git fetch` and `git push` work. Git configuration stores the helper command, never the session token. Public repositories remain anonymously cloneable without a session.
+`co clone` uses the canonical `https://git.co.codes/OWNER/REPO.git` remote. `co link` adds that remote to the Git repository containing the current directory, including a bare repository. Both commands name the remote `origin` by default; use `-u NAME` or `--set-upstream-name NAME` to override it. Add `--jj` to run `jj git init --colocate` at the repository root after Git setup succeeds. Use `--no-jj` to override a configured jj default; jj setup requires a working tree.
+
+Private repository authentication uses HTTP Basic with username `co` and the existing session as its password. Clone and link configure a URL-scoped local helper so ordinary `git fetch` and `git push` work. Git configuration stores the helper command, never the session token. Public repositories remain anonymously cloneable without a session.
 
 The helper is also available directly as `co git-credential get|store|erase`. It follows Git's credential protocol and returns credentials only for HTTPS requests to `git.co.codes` (with an optional default `:443` port).
 
-Set `CO_API_URL` to use a non-production API endpoint.
+Configuration is stored in `~/.config/co/config.json`, or `$XDG_CONFIG_HOME/co/config.json` when `XDG_CONFIG_HOME` is set. In addition to the managed `session_token`, you can set command defaults:
+
+```json
+{
+  "upstream_name": "co",
+  "jj": true
+}
+```
+
+Command-line options override these defaults. Set `CO_API_URL` to override the configured `api_url` or use a non-production API endpoint.
 
 ## Build
 
