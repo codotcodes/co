@@ -1,3 +1,4 @@
+use fs2::FileExt;
 use reqwest::StatusCode;
 use reqwest::blocking::{Client, Response};
 use serde::{Deserialize, Serialize};
@@ -7,7 +8,7 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const DEFAULT_API_URL: &str = "https://api.co.codes";
 const GIT_HOST: &str = "git.co.codes";
@@ -25,6 +26,65 @@ struct Config {
     upstream_name: Option<String>,
     #[serde(default)]
     jj: bool,
+    #[serde(default)]
+    agents: Vec<AgentIdentity>,
+    #[serde(default)]
+    pending_agent_submissions: Vec<PendingAgentSubmission>,
+    #[serde(default)]
+    pending_agent_requests: Vec<PendingAgentRequest>,
+    #[serde(default)]
+    agent_grants: Vec<AgentGrant>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct AgentIdentity {
+    id: String,
+    name: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct PendingAgentRequest {
+    id: String,
+    agent_id: String,
+    owner: String,
+    repo: String,
+    poll_token: String,
+    #[serde(default)]
+    operations: Vec<String>,
+    requested_expires_unix: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct PendingAgentSubmission {
+    agent_id: String,
+    owner: String,
+    repo: String,
+    operations: Vec<String>,
+    ttl_seconds: u64,
+    reason: Option<String>,
+    request_capability: String,
+    idempotency_key: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct AgentGrant {
+    agent_id: String,
+    owner: String,
+    repo: String,
+    grant_id: String,
+    lineage_token: String,
+    #[serde(default)]
+    operations: Vec<String>,
+    expires_unix: u64,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct AccessRequestCommand {
+    spec: String,
+    agent: Option<String>,
+    push: bool,
+    ttl_seconds: u64,
+    reason: Option<String>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -57,6 +117,49 @@ struct ApiError {
     message: Option<String>,
 }
 
+#[derive(Deserialize)]
+struct RegisteredAgent {
+    id: String,
+    name: String,
+}
+
+#[derive(Deserialize)]
+struct RegisteredAgents {
+    agents: Vec<RegisteredAgent>,
+}
+
+#[derive(Deserialize)]
+struct RequestCapability {
+    #[serde(rename = "requestCapability")]
+    request_capability: String,
+}
+
+#[derive(Deserialize)]
+struct CreatedGrantRequest {
+    id: String,
+    #[serde(rename = "pollToken")]
+    poll_token: String,
+    #[serde(rename = "approvalUrl")]
+    approval_url: String,
+    #[serde(rename = "expiresAtUnix")]
+    expires_at_unix: Option<u64>,
+}
+
+#[derive(Deserialize)]
+struct PolledGrantRequest {
+    status: String,
+    #[serde(rename = "grantId")]
+    grant_id: Option<String>,
+    #[serde(rename = "lineageToken")]
+    lineage_token: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct AgentAccessToken {
+    #[serde(rename = "accessToken")]
+    access_token: String,
+}
+
 fn main() -> ExitCode {
     match run(std::env::args().skip(1).collect()) {
         Ok(()) => ExitCode::SUCCESS,
@@ -82,6 +185,26 @@ fn run(args: Vec<String>) -> Result<(), String> {
         "logout" => logout(),
         "whoami" => whoami(),
         "doctor" => doctor(),
+        "agent" if args.get(1).map(String::as_str) == Some("register") && args.len() == 3 => {
+            register_agent(required_arg(&args, 2, "usage: co agent register <name>")?)
+        }
+        "agent" if args.get(1).map(String::as_str) == Some("list") && args.len() == 2 => {
+            list_agents()
+        }
+        "access" if args.get(1).map(String::as_str) == Some("request") => {
+            let config = load_config()?;
+            request_agent_access(parse_access_request(&args[2..])?, config)
+        }
+        "access" if args.get(1).map(String::as_str) == Some("wait") && args.len() <= 3 => {
+            wait_agent_access(args.get(2).map(String::as_str))
+        }
+        "access" if args.get(1).map(String::as_str) == Some("view") && args.len() == 3 => {
+            agent_repo_view(required_arg(
+                &args,
+                2,
+                "usage: co access view <owner/repo>",
+            )?)
+        }
         "git-credential" if args.len() == 2 => git_credential(&args[1]),
         "git-credential" => Err("usage: co git-credential get|store|erase".into()),
         "repo" if args.get(1).map(String::as_str) == Some("view") => {
@@ -96,6 +219,8 @@ fn run(args: Vec<String>) -> Result<(), String> {
             link_repo(parse_repo_command(&args[1..], false, &config)?)
         }
         "repo" => Err("usage: co repo view <owner/repo>".into()),
+        "agent" => Err("usage: co agent register <name> | co agent list".into()),
+        "access" => Err("usage: co access request|wait|view".into()),
         other => Err(format!("unknown command {other:?} (try: co help)")),
     }
 }
@@ -113,6 +238,11 @@ fn help() {
     println!("  logout                   revoke the local session");
     println!("  whoami                   show the signed-in account");
     println!("  repo view <owner/repo>   show repository metadata");
+    println!("  agent register <name>    register a local agent identity");
+    println!("  agent list               list local agent identities");
+    println!("  access request [options] <repo>  request human-approved agent access");
+    println!("  access wait [request]    resume waiting for human approval");
+    println!("  access view <owner/repo> view a repo with an approved agent grant");
     println!("  clone [options] <repo>   clone a repository over HTTPS");
     println!("  link [options] <repo>    link the local Git repository");
     println!("  git-credential <op>      serve credentials to Git");
@@ -122,6 +252,12 @@ fn help() {
     println!("Clone and link options:");
     println!("  -u, --set-upstream-name <name>  set the Git remote name (default: origin)");
     println!("      --jj / --no-jj              enable or disable colocated jj setup");
+    println!();
+    println!("Access request options:");
+    println!("      --agent <id-or-name>        use or register this agent");
+    println!("      --push                      request pull and push (default: pull)");
+    println!("      --ttl <seconds>             grant lifetime, 300-86400 (default: 3600)");
+    println!("      --reason <text>             explain the task to the approver");
     println!();
     println!("Configuration: ~/.config/co/config.json (or $XDG_CONFIG_HOME/co/config.json).");
     println!("Environment: CO_API_URL overrides https://api.co.codes.");
@@ -263,6 +399,509 @@ fn repo_view(spec: &str) -> Result<(), String> {
     );
     println!("  web             https://co.codes/{owner}/{name}");
     Ok(())
+}
+
+fn register_agent(name: &str) -> Result<(), String> {
+    let mut config = load_config()?;
+    let agent = register_agent_remote(&config, name)?;
+    if !config.agents.iter().any(|existing| existing.id == agent.id) {
+        config.agents.push(agent.clone());
+        save_config(&config)?;
+    }
+    println!("{}", agent.name);
+    println!("  id  {}", agent.id);
+    Ok(())
+}
+
+fn register_agent_remote(config: &Config, name: &str) -> Result<AgentIdentity, String> {
+    let name = name.trim();
+    if name.is_empty() || name.len() > 80 {
+        return Err("agent name must contain 1 to 80 characters".into());
+    }
+    let token = session_token(config)?;
+    let response = client()?
+        .post(format!("{}/agents", api_url(config)))
+        .bearer_auth(token)
+        .json(&serde_json::json!({ "name": name }))
+        .send()
+        .map_err(network_error)?;
+    let agent: RegisteredAgent = decode(response)?;
+    Ok(AgentIdentity {
+        id: agent.id,
+        name: agent.name,
+    })
+}
+
+fn list_agents() -> Result<(), String> {
+    let config = load_config()?;
+    if config.agents.is_empty() {
+        println!("No local agents. Run `co agent register <name>`.");
+        return Ok(());
+    }
+    for agent in config.agents {
+        println!("{}\n  id  {}", agent.name, agent.id);
+    }
+    Ok(())
+}
+
+fn parse_access_request(args: &[String]) -> Result<AccessRequestCommand, String> {
+    let usage = "usage: co access request [--agent <id-or-name>] [--push] [--ttl <seconds>] [--reason <text>] <owner/repo>";
+    let mut agent = None;
+    let mut push = false;
+    let mut ttl_seconds = 3600;
+    let mut reason = None;
+    let mut spec = None;
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--agent" => {
+                index += 1;
+                agent = Some(
+                    args.get(index)
+                        .cloned()
+                        .ok_or_else(|| format!("--agent requires a value\n{usage}"))?,
+                );
+            }
+            "--push" => push = true,
+            "--ttl" => {
+                index += 1;
+                ttl_seconds = args
+                    .get(index)
+                    .ok_or_else(|| format!("--ttl requires a value\n{usage}"))?
+                    .parse()
+                    .map_err(|_| format!("--ttl must be a number\n{usage}"))?;
+                if !(300..=86_400).contains(&ttl_seconds) {
+                    return Err("--ttl must be between 300 and 86400 seconds".into());
+                }
+            }
+            "--reason" => {
+                index += 1;
+                reason = Some(
+                    args.get(index)
+                        .cloned()
+                        .ok_or_else(|| format!("--reason requires a value\n{usage}"))?,
+                );
+            }
+            option if option.starts_with('-') => {
+                return Err(format!("unknown access option {option:?}\n{usage}"));
+            }
+            value if spec.is_none() => spec = Some(value.to_string()),
+            _ => return Err(usage.into()),
+        }
+        index += 1;
+    }
+    let spec = spec.ok_or_else(|| usage.to_string())?;
+    repo_spec(&spec)?;
+    if reason
+        .as_ref()
+        .is_some_and(|reason| reason.chars().count() > 500)
+    {
+        return Err("--reason must be 500 characters or fewer".into());
+    }
+    Ok(AccessRequestCommand {
+        spec,
+        agent,
+        push,
+        ttl_seconds,
+        reason,
+    })
+}
+
+fn request_agent_access(command: AccessRequestCommand, mut config: Config) -> Result<(), String> {
+    let agent = resolve_or_register_agent(&mut config, command.agent.as_deref())?;
+    let api = api_url(&config);
+    let (owner, repo) = repo_spec(&command.spec)?;
+    let mut operations = vec!["pull".to_string()];
+    if command.push {
+        operations.push("push".into());
+    }
+    let submission = if let Some(submission) = config
+        .pending_agent_submissions
+        .iter()
+        .find(|submission| {
+            submission.agent_id == agent.id
+                && submission.owner == owner
+                && submission.repo == repo
+                && submission.operations == operations
+                && submission.ttl_seconds == command.ttl_seconds
+                && submission.reason == command.reason
+        })
+        .cloned()
+    {
+        submission
+    } else {
+        let session = session_token(&config)?;
+        let capability: RequestCapability = decode(
+            client()?
+                .post(format!("{api}/agents/{}/request-capabilities", agent.id))
+                .bearer_auth(session)
+                .send()
+                .map_err(network_error)?,
+        )?;
+        let submission = PendingAgentSubmission {
+            agent_id: agent.id.clone(),
+            owner: owner.into(),
+            repo: repo.into(),
+            operations: operations.clone(),
+            ttl_seconds: command.ttl_seconds,
+            reason: command.reason.clone(),
+            request_capability: capability.request_capability,
+            idempotency_key: format!(
+                "co-{:x}-{:x}",
+                std::process::id(),
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map_err(|_| "system clock is before Unix epoch")?
+                    .as_nanos()
+            ),
+        };
+        mutate_config(|latest| {
+            latest.pending_agent_submissions.push(submission.clone());
+        })?;
+        submission
+    };
+    let response = client()?
+        .post(format!("{api}/grant-requests"))
+        .header(
+            "authorization",
+            format!("Agent-Request {}", submission.request_capability),
+        )
+        .header("idempotency-key", &submission.idempotency_key)
+        .json(&serde_json::json!({
+            "agentId": agent.id,
+            "owner": owner,
+            "repo": repo,
+            "operations": operations,
+            "ttlSeconds": command.ttl_seconds,
+            "reason": command.reason,
+        }))
+        .send()
+        .map_err(|error| {
+            format!(
+                "{}; rerun the same command to resume safely",
+                network_error(error)
+            )
+        })?;
+    if matches!(
+        response.status(),
+        StatusCode::UNAUTHORIZED | StatusCode::CONFLICT
+    ) {
+        mutate_config(|latest| {
+            latest
+                .pending_agent_submissions
+                .retain(|candidate| candidate.idempotency_key != submission.idempotency_key);
+        })?;
+        return Err("request capability expired or was already used; rerun the command to issue a fresh capability".into());
+    }
+    let created: CreatedGrantRequest = decode(response)?;
+    let pending = PendingAgentRequest {
+        id: created.id.clone(),
+        agent_id: agent.id,
+        owner: owner.into(),
+        repo: repo.into(),
+        poll_token: created.poll_token,
+        operations: submission.operations,
+        requested_expires_unix: created
+            .expires_at_unix
+            .unwrap_or(unix_now()?.saturating_add(command.ttl_seconds)),
+    };
+    mutate_config(|latest| {
+        latest
+            .pending_agent_submissions
+            .retain(|candidate| candidate.idempotency_key != submission.idempotency_key);
+        latest
+            .pending_agent_requests
+            .retain(|request| request.id != pending.id);
+        latest.pending_agent_requests.push(pending.clone());
+    })?;
+
+    println!("Human approval required:");
+    println!("  request {}", created.id);
+    println!("  {}", created.approval_url);
+    if webbrowser::open(&created.approval_url).is_err() {
+        println!("Unable to open a browser automatically.");
+    }
+    println!("Waiting for a human to approve or deny...");
+    wait_agent_access(Some(&created.id))
+}
+
+fn resolve_or_register_agent(
+    config: &mut Config,
+    selector: Option<&str>,
+) -> Result<AgentIdentity, String> {
+    if let Some(selector) = selector {
+        if let Some(agent) = config
+            .agents
+            .iter()
+            .find(|agent| agent.id == selector)
+            .cloned()
+        {
+            return Ok(agent);
+        }
+        let local_names: Vec<_> = config
+            .agents
+            .iter()
+            .filter(|agent| agent.name == selector)
+            .cloned()
+            .collect();
+        match local_names.as_slice() {
+            [agent] => return Ok(agent.clone()),
+            [_, _, ..] => {
+                return Err(format!(
+                    "multiple agents are named {selector:?}; pass an agent ID"
+                ));
+            }
+            [] => {}
+        }
+        let remote: RegisteredAgents = decode(authenticated_get(config, "/agents")?)?;
+        if let Some(agent) = remote.agents.iter().find(|agent| agent.id == selector) {
+            let agent = AgentIdentity {
+                id: agent.id.clone(),
+                name: agent.name.clone(),
+            };
+            config.agents.push(agent.clone());
+            save_config(config)?;
+            return Ok(agent);
+        }
+        let remote_names: Vec<_> = remote
+            .agents
+            .into_iter()
+            .filter(|agent| agent.name == selector)
+            .collect();
+        match remote_names.as_slice() {
+            [agent] => {
+                let agent = AgentIdentity {
+                    id: agent.id.clone(),
+                    name: agent.name.clone(),
+                };
+                config.agents.push(agent.clone());
+                save_config(config)?;
+                return Ok(agent);
+            }
+            [_, _, ..] => {
+                return Err(format!(
+                    "multiple agents are named {selector:?}; pass an agent ID"
+                ));
+            }
+            [] => {}
+        }
+        let agent = register_agent_remote(config, selector)?;
+        config.agents.push(agent.clone());
+        save_config(config)?;
+        println!("Registered agent {} ({})", agent.name, agent.id);
+        return Ok(agent);
+    }
+    match config.agents.as_slice() {
+        [agent] => Ok(agent.clone()),
+        [] => Err("no local agent; pass `--agent <name>` to register one".into()),
+        _ => Err("multiple local agents; pass `--agent <id-or-name>`".into()),
+    }
+}
+
+fn wait_agent_access(request_id: Option<&str>) -> Result<(), String> {
+    let config = load_config()?;
+    let index = pending_request_index(&config, request_id)?;
+    let pending = config.pending_agent_requests[index].clone();
+    let api = api_url(&config);
+    let mut backoff = 2;
+    loop {
+        if unix_now()? >= pending.requested_expires_unix {
+            remove_pending_agent_request(&pending.id)?;
+            return Err("access request expired; run `co access request` again".into());
+        }
+        let response = match client()?
+            .get(format!("{api}/grant-requests/{}", pending.id))
+            .header("authorization", format!("Poll {}", pending.poll_token))
+            .send()
+        {
+            Ok(response) => response,
+            Err(error) => {
+                eprintln!("co: warning: {}; retrying", network_error(error));
+                thread::sleep(Duration::from_secs(backoff));
+                backoff = (backoff * 2).min(15);
+                continue;
+            }
+        };
+        if response.status() == StatusCode::TOO_MANY_REQUESTS || response.status().is_server_error()
+        {
+            let retry_after = retry_after_seconds(&response)
+                .unwrap_or(backoff)
+                .max(1)
+                .min(
+                    pending
+                        .requested_expires_unix
+                        .saturating_sub(unix_now()?)
+                        .max(1),
+                );
+            eprintln!(
+                "co: warning: approval service returned {}; retrying",
+                response.status()
+            );
+            thread::sleep(Duration::from_secs(retry_after));
+            backoff = (backoff * 2).min(15);
+            continue;
+        }
+        let polled: PolledGrantRequest = decode(response)?;
+        match polled.status.as_str() {
+            "pending" => {
+                thread::sleep(Duration::from_secs(backoff));
+                backoff = (backoff * 2).min(15);
+            }
+            "approved" => {
+                let grant_id = polled.grant_id.ok_or("approved response omitted grantId")?;
+                let lineage_token = polled
+                    .lineage_token
+                    .ok_or("approved response omitted lineageToken")?;
+                store_approved_agent_grant(
+                    &pending,
+                    AgentGrant {
+                        agent_id: pending.agent_id.clone(),
+                        owner: pending.owner.clone(),
+                        repo: pending.repo.clone(),
+                        grant_id,
+                        lineage_token,
+                        operations: pending.operations.clone(),
+                        expires_unix: pending.requested_expires_unix,
+                    },
+                )?;
+                println!("Access approved for {}/{}.", pending.owner, pending.repo);
+                println!("Run `co access view {}/{}`.", pending.owner, pending.repo);
+                return Ok(());
+            }
+            "denied" => {
+                remove_pending_agent_request(&pending.id)?;
+                return Err("access request was denied by the human approver".into());
+            }
+            "expired" => {
+                remove_pending_agent_request(&pending.id)?;
+                return Err("access request expired; run `co access request` again".into());
+            }
+            status => return Err(format!("unknown access request status {status:?}")),
+        }
+    }
+}
+
+fn retry_after_seconds(response: &Response) -> Option<u64> {
+    let value = response.headers().get("retry-after")?.to_str().ok()?;
+    if let Ok(seconds) = value.parse() {
+        return Some(seconds);
+    }
+    httpdate::parse_http_date(value)
+        .ok()?
+        .duration_since(SystemTime::now())
+        .ok()
+        .map(|duration| duration.as_secs())
+}
+
+fn remove_pending_agent_request(request_id: &str) -> Result<(), String> {
+    mutate_config(|config| {
+        config
+            .pending_agent_requests
+            .retain(|request| request.id != request_id);
+    })
+}
+
+fn store_approved_agent_grant(
+    pending: &PendingAgentRequest,
+    grant: AgentGrant,
+) -> Result<(), String> {
+    mutate_config(|config| {
+        config.agent_grants.retain(|existing| {
+            !(existing.agent_id == pending.agent_id
+                && existing.owner == pending.owner
+                && existing.repo == pending.repo)
+        });
+        config.agent_grants.push(grant);
+        config
+            .pending_agent_requests
+            .retain(|request| request.id != pending.id);
+    })
+}
+
+fn pending_request_index(config: &Config, request_id: Option<&str>) -> Result<usize, String> {
+    if let Some(request_id) = request_id {
+        return config
+            .pending_agent_requests
+            .iter()
+            .position(|request| request.id == request_id)
+            .ok_or_else(|| format!("no local pending request {request_id:?}"));
+    }
+    match config.pending_agent_requests.len() {
+        0 => Err("no pending agent access request".into()),
+        1 => Ok(0),
+        _ => Err(
+            "multiple pending requests; pass the request ID shown by `co access request`".into(),
+        ),
+    }
+}
+
+fn agent_repo_view(spec: &str) -> Result<(), String> {
+    let (owner, repo) = repo_spec(spec)?;
+    let config = load_config()?;
+    let token = mint_agent_access_token(&config, owner, repo)?;
+    let response = client()?
+        .get(format!("{}/t:{token}/{owner}/{repo}", api_url(&config)))
+        .send()
+        .map_err(|error| {
+            if error.is_timeout() {
+                String::from("agent repository request timed out")
+            } else {
+                String::from("agent repository request failed")
+            }
+        })?;
+    let mut body: Value = decode(response)?;
+    if let Some(urls) = body.get_mut("urls").and_then(Value::as_object_mut) {
+        urls.remove("self");
+    }
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&body)
+            .map_err(|error| format!("unable to render repository response: {error}"))?
+    );
+    Ok(())
+}
+
+fn mint_agent_access_token(config: &Config, owner: &str, repo: &str) -> Result<String, String> {
+    let now = unix_now()?;
+    let mut grants = config.agent_grants.iter().filter(|grant| {
+        grant.owner == owner
+            && grant.repo == repo
+            && grant.expires_unix > now
+            && grant.operations.iter().any(|operation| operation == "pull")
+    });
+    let grant = grants.next().ok_or_else(|| {
+        format!("no live pull grant for {owner}/{repo}; run `co access request {owner}/{repo}`")
+    })?;
+    if grants.next().is_some() {
+        return Err(format!(
+            "multiple live agent grants for {owner}/{repo}; use a separate local co config per agent"
+        ));
+    }
+    let token: AgentAccessToken = decode(
+        client()?
+            .post(format!(
+                "{}/grants/{}/token",
+                api_url(config),
+                grant.grant_id
+            ))
+            .header("authorization", format!("Lineage {}", grant.lineage_token))
+            .send()
+            .map_err(network_error)?,
+    )?;
+    Ok(token.access_token)
+}
+
+fn unix_now() -> Result<u64, String> {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .map_err(|_| "system clock is before Unix epoch".into())
+}
+
+fn session_token(config: &Config) -> Result<&str, String> {
+    config.session_token.as_deref().ok_or_else(|| {
+        "not signed in; run `co login` and have a human authorize this machine".into()
+    })
 }
 
 fn git_credential(operation: &str) -> Result<(), String> {
@@ -714,6 +1353,18 @@ fn load_config() -> Result<Config, String> {
 }
 
 fn save_config(config: &Config) -> Result<(), String> {
+    with_config_lock(|| save_config_unlocked(config))
+}
+
+fn mutate_config(update: impl FnOnce(&mut Config)) -> Result<(), String> {
+    with_config_lock(|| {
+        let mut config = load_config()?;
+        update(&mut config);
+        save_config_unlocked(&config)
+    })
+}
+
+fn with_config_lock<T>(operation: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
     let path = config_path()?;
     let parent = path.parent().ok_or("invalid config path")?;
     fs::create_dir_all(parent)
@@ -724,7 +1375,28 @@ fn save_config(config: &Config) -> Result<(), String> {
         fs::set_permissions(parent, fs::Permissions::from_mode(0o700))
             .map_err(|error| format!("unable to secure {}: {error}", parent.display()))?;
     }
-    let temporary = path.with_extension("json.tmp");
+    let lock_path = path.with_extension("json.lock");
+    let mut options = OpenOptions::new();
+    options.read(true).write(true).create(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let lock = options
+        .open(&lock_path)
+        .map_err(|error| format!("unable to open {}: {error}", lock_path.display()))?;
+    lock.lock_exclusive()
+        .map_err(|error| format!("unable to lock {}: {error}", lock_path.display()))?;
+    let result = operation();
+    FileExt::unlock(&lock)
+        .map_err(|error| format!("unable to unlock {}: {error}", lock_path.display()))?;
+    result
+}
+
+fn save_config_unlocked(config: &Config) -> Result<(), String> {
+    let path = config_path()?;
+    let temporary = path.with_extension(format!("json.{}.tmp", std::process::id()));
     write_private(
         &temporary,
         &serde_json::to_vec_pretty(config).map_err(|error| error.to_string())?,
@@ -766,8 +1438,9 @@ mod tests {
 
     #[test]
     fn parses_and_scopes_git_credentials() {
-        let credential =
-            parse_credential("protocol=https\r\nhost=git.co.codes:443\r\npath=a/b.git\r\n\r\n");
+        let credential = parse_credential(
+            "protocol=https\r\nhost=git.co.codes:443\r\npath=hackr/www.git\r\n\r\n",
+        );
         assert_eq!(
             credential,
             GitCredential {
@@ -884,10 +1557,34 @@ mod tests {
     fn trims_api_url() {
         let config = Config {
             api_url: Some("https://example.test/".into()),
-            session_token: None,
-            upstream_name: None,
-            jj: false,
+            ..Config::default()
         };
         assert_eq!(api_url(&config), "https://example.test");
+    }
+
+    #[test]
+    fn parses_agent_access_request_options() {
+        assert_eq!(
+            parse_access_request(&[
+                "--agent".into(),
+                "opencode".into(),
+                "--push".into(),
+                "--ttl".into(),
+                "900".into(),
+                "--reason".into(),
+                "review the site".into(),
+                "hackr/www".into(),
+            ])
+            .unwrap(),
+            AccessRequestCommand {
+                spec: "hackr/www".into(),
+                agent: Some("opencode".into()),
+                push: true,
+                ttl_seconds: 900,
+                reason: Some("review the site".into()),
+            }
+        );
+        assert!(parse_access_request(&["--ttl".into(), "2".into(), "hackr/www".into()]).is_err());
+        assert!(parse_access_request(&["--wat".into(), "hackr/www".into()]).is_err());
     }
 }

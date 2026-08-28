@@ -2,7 +2,7 @@
 
 `co` is the human command-line client for [co.codes](https://co.codes).
 
-The current release supports browser-based device login, account inspection, repository metadata, Git clone and push authentication, and production diagnostics.
+The current release supports browser-based device login, account inspection, human-approved agent access, repository metadata, Git clone and push authentication, and production diagnostics.
 
 ## Install
 
@@ -41,6 +41,11 @@ The installer defaults to `~/.local/bin`. Set `CO_INSTALL_DIR` to choose another
 co login
 co whoami
 co repo view OWNER/REPO
+co agent register NAME
+co agent list
+co access request --agent NAME OWNER/REPO
+co access wait [REQUEST_ID]
+co access view OWNER/REPO
 co clone [OPTIONS] OWNER/REPO [DIRECTORY]
 co link [OPTIONS] OWNER/REPO
 co doctor
@@ -49,9 +54,13 @@ co logout
 
 `co login` opens a browser for explicit device authorization. The local session is stored under the platform configuration directory with owner-only permissions. It is never written to Git configuration or passed as a command argument.
 
+`co access request --agent NAME OWNER/REPO` registers the named agent when needed, creates a one-time request capability through the existing machine session, and opens the repository access request in a browser. The command waits while a human owner or maintainer reviews the exact repository, operations, reason, and expiry. Approval requires a passkey; opening the browser grants nothing. Add `--push` to request pull and push instead of pull only, `--ttl SECONDS` for a 5-minute to 24-hour lifetime, and `--reason TEXT` to explain the task.
+
+Pending requests are saved before the browser opens. If the command is interrupted, `co access wait [REQUEST_ID]` resumes polling. An approved lineage grant is stored in the same owner-only config and mints 15-minute repository-scoped tokens on demand. `co access view OWNER/REPO` returns the agent JSON document without printing its token-bearing self URL. Agent Git transport remains a separate follow-up; ordinary `co clone`, fetch, and push retain the human credential path.
+
 `co clone` uses the canonical `https://git.co.codes/OWNER/REPO.git` remote. `co link` adds that remote to the Git repository containing the current directory, including a bare repository. Both commands name the remote `origin` by default; use `-u NAME` or `--set-upstream-name NAME` to override it. Add `--jj` to run `jj git init --colocate` at the repository root after Git setup succeeds. Use `--no-jj` to override a configured jj default; jj setup requires a working tree.
 
-Private repository authentication uses HTTP Basic with username `co` and the existing session as its password. Clone and link configure a URL-scoped local helper so ordinary `git fetch` and `git push` work. Git configuration stores the helper command, never the session token. Public repositories remain anonymously cloneable without a session.
+Private repository authentication uses HTTP Basic with username `co` and the existing human session as its password. Clone and link configure a URL-scoped local helper so ordinary `git fetch` and `git push` work. Git configuration stores the helper command, never the session token. Public repositories remain anonymously cloneable without a session.
 
 The helper is also available directly as `co git-credential get|store|erase`. It follows Git's credential protocol and returns credentials only for HTTPS requests to `git.co.codes` (with an optional default `:443` port).
 
