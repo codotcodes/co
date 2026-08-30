@@ -6,7 +6,7 @@ Security fixes are applied to the latest released minor version. Upgrade to the 
 
 ## Reporting a vulnerability
 
-Use GitHub private vulnerability reporting for `0xhckr/co`. Do not open a public issue for vulnerabilities involving credentials, device authorization, session handling, update delivery, or release integrity.
+Use GitHub private vulnerability reporting for `codotcodes/co`. Do not open a public issue for vulnerabilities involving credentials, device authorization, session handling, update delivery, or release integrity.
 
 Include the affected version, operating system, reproduction steps, and expected impact. Remove access tokens, user codes, email addresses, and repository names from logs before attaching them.
 

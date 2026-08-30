@@ -9,13 +9,13 @@ The current release supports browser-based device login, account inspection, hum
 Linux and macOS:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/0xhckr/co/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/codotcodes/co/main/install.sh | sh
 ```
 
 Nix:
 
 ```sh
-nix run github:0xhckr/co -- help
+nix run github:codotcodes/co -- help
 ```
 
 Cargo:

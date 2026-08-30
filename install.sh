@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-repository="${CO_REPOSITORY:-0xhckr/co}"
+repository="${CO_REPOSITORY:-codotcodes/co}"
 version="${CO_VERSION:-latest}"
 install_dir="${CO_INSTALL_DIR:-${HOME}/.local/bin}"
 
