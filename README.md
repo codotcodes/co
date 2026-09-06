@@ -2,7 +2,7 @@
 
 `co` is the human command-line client for [co.codes](https://co.codes).
 
-The current release supports browser-based device login, account inspection, human-approved agent access, repository metadata, Git clone and push authentication, and production diagnostics.
+The CLI supports browser-based device login, account inspection, human-approved agent access, repository creation and metadata, Git clone and push authentication, and production diagnostics.
 
 ## Install
 
@@ -41,6 +41,7 @@ The installer defaults to `~/.local/bin`. Set `CO_INSTALL_DIR` to choose another
 co login
 co whoami
 co repo view OWNER/REPO
+co repo create [--public | --private] [--json] [OWNER/]NAME
 co agent register NAME
 co agent list
 co access request --agent NAME OWNER/REPO
@@ -53,6 +54,17 @@ co logout
 ```
 
 `co login` opens a browser for explicit device authorization. The local session is stored under the platform configuration directory with owner-only permissions. It is never written to Git configuration or passed as a command argument.
+
+`co repo create NAME` creates an empty private repository in your personal namespace. Use `OWNER/NAME` for an explicit namespace you can write to, and `--public` to make the repository public. Creation is non-interactive and uses the existing `co login` machine session, so a coding agent can run it on your behalf with that session's permissions. Repository-scoped agent grants do not authorize repository creation.
+
+```sh
+co repo create my-project
+co repo create my-org/my-project --public --json
+```
+
+`--json` writes the repository API response to stdout, including its `id`, resolved `owner`, `name`, `visibility`, `defaultBranch`, timestamps, and `created` storage flag. Errors go to stderr with a nonzero exit status. A successful creation with `created: false` still exits successfully: the repository is registered, but Git storage initialization was not confirmed, and a message goes to stderr. If a request times out, check whether the repository exists before retrying.
+
+To connect existing local code after creation, run `co link OWNER/NAME`. To get a new checkout, run `co clone OWNER/NAME`.
 
 `co access request --agent NAME OWNER/REPO` registers the named agent when needed, creates a one-time request capability through the existing machine session, and opens the repository access request in a browser. The command waits while a human owner or maintainer reviews the exact repository, operations, reason, and expiry. Approval requires a passkey; opening the browser grants nothing. Add `--push` to request pull and push instead of pull only, `--ttl SECONDS` for a 5-minute to 24-hour lifetime, and `--reason TEXT` to explain the task.
 

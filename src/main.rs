@@ -15,6 +15,8 @@ const GIT_HOST: &str = "git.co.codes";
 const DEVICE_CLIENT_ID: &str = "co-cli";
 const DEVICE_GRANT: &str = "urn:ietf:params:oauth:grant-type:device_code";
 const DEFAULT_UPSTREAM_NAME: &str = "origin";
+const REPO_CREATE_USAGE: &str =
+    "usage: co repo create [--public | --private] [--json] <[owner/]name>";
 
 #[derive(Debug, Default, Deserialize, Serialize)]
 struct Config {
@@ -93,6 +95,26 @@ struct RepoCommand {
     directory: Option<String>,
     upstream_name: String,
     jj: bool,
+}
+
+#[derive(Debug, PartialEq, Eq, Serialize)]
+struct CreateRepoCommand {
+    name: String,
+    #[serde(rename = "orgSlug", skip_serializing_if = "Option::is_none")]
+    owner: Option<String>,
+    visibility: &'static str,
+    #[serde(skip)]
+    json: bool,
+}
+
+#[derive(Deserialize, Serialize)]
+struct CreatedRepo {
+    owner: String,
+    name: String,
+    visibility: String,
+    created: bool,
+    #[serde(flatten)]
+    metadata: serde_json::Map<String, Value>,
 }
 
 #[derive(Deserialize)]
@@ -210,6 +232,18 @@ fn run(args: Vec<String>) -> Result<(), String> {
         "repo" if args.get(1).map(String::as_str) == Some("view") => {
             repo_view(required_arg(&args, 2, "usage: co repo view <owner/repo>")?)
         }
+        "repo" if args.get(1).map(String::as_str) == Some("create") => {
+            if args[2..]
+                .iter()
+                .any(|arg| matches!(arg.as_str(), "--help" | "-h"))
+            {
+                println!("{REPO_CREATE_USAGE}");
+                println!("Create in your personal namespace by default, with private visibility.");
+                println!("Use --json for machine-readable output. Requires `co login`.");
+                return Ok(());
+            }
+            create_repo(parse_repo_create(&args[2..])?)
+        }
         "clone" => {
             let config = load_config()?;
             clone_repo(parse_repo_command(&args[1..], true, &config)?)
@@ -218,7 +252,9 @@ fn run(args: Vec<String>) -> Result<(), String> {
             let config = load_config()?;
             link_repo(parse_repo_command(&args[1..], false, &config)?)
         }
-        "repo" => Err("usage: co repo view <owner/repo>".into()),
+        "repo" => Err(format!(
+            "usage: co repo view <owner/repo>\n{REPO_CREATE_USAGE}"
+        )),
         "agent" => Err("usage: co agent register <name> | co agent list".into()),
         "access" => Err("usage: co access request|wait|view".into()),
         other => Err(format!("unknown command {other:?} (try: co help)")),
@@ -238,6 +274,7 @@ fn help() {
     println!("  logout                   revoke the local session");
     println!("  whoami                   show the signed-in account");
     println!("  repo view <owner/repo>   show repository metadata");
+    println!("  repo create [options] <[owner/]name>  create a repository");
     println!("  agent register <name>    register a local agent identity");
     println!("  agent list               list local agent identities");
     println!("  access request [options] <repo>  request human-approved agent access");
@@ -252,6 +289,10 @@ fn help() {
     println!("Clone and link options:");
     println!("  -u, --set-upstream-name <name>  set the Git remote name (default: origin)");
     println!("      --jj / --no-jj              enable or disable colocated jj setup");
+    println!();
+    println!("Repository creation options:");
+    println!("      --public / --private        set visibility (default: private)");
+    println!("      --json                      print the API response as JSON");
     println!();
     println!("Access request options:");
     println!("      --agent <id-or-name>        use or register this agent");
@@ -398,6 +439,95 @@ fn repo_view(spec: &str) -> Result<(), String> {
         repo["defaultBranch"].as_str().unwrap_or("unknown")
     );
     println!("  web             https://co.codes/{owner}/{name}");
+    Ok(())
+}
+
+fn parse_repo_create(args: &[String]) -> Result<CreateRepoCommand, String> {
+    let mut spec = None;
+    let mut visibility = None;
+    let mut json = false;
+    for arg in args {
+        match arg.as_str() {
+            "--public" | "--private" => {
+                let selected = if arg == "--public" {
+                    "public"
+                } else {
+                    "private"
+                };
+                if visibility.is_some_and(|previous| previous != selected) {
+                    return Err("choose either --public or --private".into());
+                }
+                visibility = Some(selected);
+            }
+            "--json" => json = true,
+            option if option.starts_with('-') => {
+                return Err(format!(
+                    "unknown repository creation option {option:?}\n{REPO_CREATE_USAGE}"
+                ));
+            }
+            value if spec.is_none() => spec = Some(value),
+            _ => return Err(REPO_CREATE_USAGE.into()),
+        }
+    }
+    let spec = spec.ok_or(REPO_CREATE_USAGE)?;
+    let (owner, name) = match spec.split_once('/') {
+        Some((owner, name)) => {
+            // Reuse namespace validation without imposing repo-view's older name rules.
+            repo_spec(&format!("{owner}/repo"))?;
+            (Some(owner.to_string()), name)
+        }
+        None => (None, spec),
+    };
+    // Match POST /repos: ASCII, 1-128 bytes, leading dot allowed, no consecutive dots.
+    if !(1..=128).contains(&name.len())
+        || name == "."
+        || name.contains("..")
+        || !name.bytes().enumerate().all(|(index, byte)| {
+            byte.is_ascii_alphanumeric()
+                || byte == b'.'
+                || (index > 0 && matches!(byte, b'_' | b'-'))
+        })
+    {
+        return Err("repository name must contain 1-128 letters, numbers, dots, underscores, or hyphens; it cannot start with _ or -, equal ., or contain consecutive dots".into());
+    }
+    Ok(CreateRepoCommand {
+        name: name.to_string(),
+        owner,
+        visibility: visibility.unwrap_or("private"),
+        json,
+    })
+}
+
+fn create_repo(command: CreateRepoCommand) -> Result<(), String> {
+    let config = load_config()?;
+    let token = session_token(&config)?;
+    let response = client()?
+        .post(format!("{}/repos", api_url(&config)))
+        .bearer_auth(token)
+        .json(&command)
+        .send()
+        .map_err(|error| {
+            format!(
+                "{}; creation may have completed; check the repository before retrying",
+                network_error(error)
+            )
+        })?;
+    let repo: CreatedRepo = decode(response)?;
+    if command.json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&repo).map_err(|error| error.to_string())?
+        );
+    } else {
+        println!("Created {}/{} ({})", repo.owner, repo.name, repo.visibility);
+        println!("  web  https://co.codes/{}/{}", repo.owner, repo.name);
+        println!("  git  https://{GIT_HOST}/{}/{}.git", repo.owner, repo.name);
+    }
+    if !repo.created {
+        eprintln!(
+            "co: repository registered, but Git storage initialization was not confirmed; check the repository before pushing"
+        );
+    }
     Ok(())
 }
 

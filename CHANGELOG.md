@@ -4,6 +4,8 @@ All notable changes are documented here. This project follows semantic versionin
 
 ## [Unreleased]
 
+- Add non-interactive `co repo create [OWNER/]NAME` with private defaults, explicit visibility, and JSON output for humans and coding agents using an authorized machine session.
+
 ## [0.2.0] - 2026-08-26
 
 - Add authenticated `co clone` over the canonical co.codes smart HTTP URL.
