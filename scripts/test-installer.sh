@@ -18,4 +18,4 @@ CO_VERSION="v0.0.0" \
 PATH="$PATH:$tmp/bin" \
 sh "$root/install.sh"
 
-test "$("$tmp/bin/co" version)" = "co 0.2.0"
+test "$("$tmp/bin/co" version)" = "co 0.3.0"
