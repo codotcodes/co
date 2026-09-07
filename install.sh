@@ -12,17 +12,14 @@ fail() {
 
 command -v curl >/dev/null 2>&1 || fail "curl is required"
 command -v tar >/dev/null 2>&1 || fail "tar is required"
+command -v install >/dev/null 2>&1 || fail "install is required"
 
 case "$(uname -s)" in
   Linux)
     os="unknown-linux"
-    if command -v ldd >/dev/null 2>&1 && ldd --version 2>&1 | grep -qi musl; then
-      libc="musl"
-    elif ls /lib/ld-musl-*.so.1 >/dev/null 2>&1; then
-      libc="musl"
-    else
-      libc="gnu"
-    fi
+    # Static musl releases also run on older glibc distributions.
+    libc="${CO_LIBC:-musl}"
+    case "$libc" in musl|gnu) ;; *) fail "CO_LIBC must be musl or gnu" ;; esac
     ;;
   Darwin)
     os="apple-darwin"
@@ -55,8 +52,11 @@ if [ -n "${CO_DOWNLOAD_BASE:-}" ]; then
     *) fail "CO_DOWNLOAD_BASE must use https:// or file://" ;;
   esac
 elif [ "$version" = "latest" ]; then
-  base="https://github.com/${repository}/releases/latest/download"
   protocols="=https"
+  release_url="$(curl -fLsS --retry 3 --proto '=https' --proto-redir '=https' --tlsv1.2 -o /dev/null -w '%{url_effective}' "https://github.com/${repository}/releases/latest")"
+  version="${release_url##*/}"
+  printf '%s\n' "$version" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$' || fail "unable to resolve the latest release"
+  base="https://github.com/${repository}/releases/download/${version}"
 else
   case "$version" in v*) ;; *) version="v${version}" ;; esac
   base="https://github.com/${repository}/releases/download/${version}"
@@ -64,24 +64,35 @@ else
 fi
 
 tmp="$(mktemp -d 2>/dev/null || mktemp -d -t co-install)"
-trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+staged=""
+trap 'rm -rf "$tmp"; if [ -n "$staged" ]; then rm -f "$staged"; fi' EXIT HUP INT TERM
 
 printf 'Downloading co for %s...\n' "$target"
-curl -fLsS --retry 3 --proto "$protocols" --tlsv1.2 "${base}/${asset}" -o "${tmp}/${asset}"
-curl -fLsS --retry 3 --proto "$protocols" --tlsv1.2 "${base}/${asset}.sha256" -o "${tmp}/${asset}.sha256"
+curl -fLsS --retry 3 --proto "$protocols" --proto-redir "$protocols" --tlsv1.2 "${base}/${asset}" -o "${tmp}/${asset}"
+curl -fLsS --retry 3 --proto "$protocols" --proto-redir "$protocols" --tlsv1.2 "${base}/${asset}.sha256" -o "${tmp}/${asset}.sha256"
+
+expected="$(awk -v file="$asset" '$2 == file || $2 == "*" file { print $1 }' "${tmp}/${asset}.sha256")"
+printf '%s\n' "$expected" | grep -Eq '^[a-fA-F0-9]{64}$' || fail "checksum file must identify the release archive"
+printf '%s  %s\n' "$expected" "$asset" > "${tmp}/verified.sha256"
 
 if command -v sha256sum >/dev/null 2>&1; then
-  (cd "$tmp" && sha256sum -c "${asset}.sha256") >/dev/null
+  (cd "$tmp" && sha256sum -c verified.sha256) >/dev/null
 elif command -v shasum >/dev/null 2>&1; then
-  (cd "$tmp" && shasum -a 256 -c "${asset}.sha256") >/dev/null
+  (cd "$tmp" && shasum -a 256 -c verified.sha256) >/dev/null
 else
   fail "sha256sum or shasum is required to verify the download"
 fi
 
-tar -xzf "${tmp}/${asset}" -C "$tmp"
+member="$(tar -tzf "${tmp}/${asset}" | grep -E '^(\./)?co$')"
+test -n "$member" || fail "release archive does not contain the co binary"
+tar -xzf "${tmp}/${asset}" -C "$tmp" "$member"
 test -f "${tmp}/co" || fail "release archive does not contain the co binary"
+test ! -L "${tmp}/co" || fail "release binary must not be a symlink"
 mkdir -p "$install_dir"
-install -m 0755 "${tmp}/co" "${install_dir}/co"
+staged="$(mktemp "${install_dir}/.co.XXXXXX")"
+install -m 0755 "${tmp}/co" "$staged"
+mv -f "$staged" "${install_dir}/co"
+staged=""
 
 printf 'Installed co to %s/co\n' "$install_dir"
 case ":${PATH}:" in

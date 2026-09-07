@@ -4,6 +4,10 @@ All notable changes are documented here. This project follows semantic versionin
 
 ## [Unreleased]
 
+- Add a Homebrew formula and release packaging for Debian/Ubuntu, Fedora/RHEL, and Arch Linux on x86_64 and ARM64.
+- Document installation, upgrades, removal, and PATH setup in one platform-organized guide.
+- Pin installer downloads to one release, use portable static Linux binaries by default, and replace binaries atomically after checksum verification.
+
 ## [0.3.0] - 2026-09-06
 
 - Add non-interactive `co repo create [OWNER/]NAME` with private defaults, explicit visibility, and JSON output for humans and coding agents using an authorized machine session.

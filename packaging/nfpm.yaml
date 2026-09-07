@@ -1,0 +1,26 @@
+name: co-codes-cli
+arch: ${CO_PACKAGE_ARCH}
+platform: linux
+version: ${CO_PACKAGE_VERSION}
+release: 1
+section: utils
+priority: optional
+maintainer: co.codes <hello@co.codes>
+description: Human command-line client for co.codes
+homepage: https://co.codes
+license: MIT OR Apache-2.0
+depends:
+  - git
+  - ca-certificates
+contents:
+  - src: ${CO_PACKAGE_BINARY}
+    dst: /usr/bin/co
+    expand: true
+    file_info:
+      mode: 0755
+  - src: LICENSE-MIT
+    dst: /usr/share/licenses/co-codes-cli/LICENSE-MIT
+  - src: LICENSE-APACHE
+    dst: /usr/share/licenses/co-codes-cli/LICENSE-APACHE
+  - src: docs/install.md
+    dst: /usr/share/doc/co-codes-cli/install.md

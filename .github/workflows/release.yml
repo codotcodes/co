@@ -63,17 +63,52 @@ jobs:
           else
             (cd dist && shasum -a 256 "$asset" > "$asset.sha256")
           fi
+      - uses: actions/setup-go@v6
+        if: matrix.musl
+        with:
+          go-version: stable
+      - name: Build distribution packages
+        if: matrix.musl
+        run: |
+          go install github.com/goreleaser/nfpm/v2/cmd/nfpm@v2.47.0
+          sh scripts/package-linux.sh "$GITHUB_REF_NAME" "${{ matrix.target }}" "target/${{ matrix.target }}/release/co" dist
+          for package in dist/*.deb dist/*.rpm dist/*.pkg.tar.zst; do
+            (cd dist && sha256sum "$(basename "$package")" > "$(basename "$package").sha256")
+          done
       - uses: actions/attest-build-provenance@v4
         with:
-          subject-path: dist/co-${{ matrix.target }}.tar.gz
+          subject-path: dist/*
       - uses: actions/upload-artifact@v7
         with:
           name: co-${{ matrix.target }}
           path: dist/*
           if-no-files-found: error
 
-  github-release:
+  package-smoke:
     needs: build
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-musl
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          name: co-${{ matrix.target }}
+          path: dist
+      - run: cd dist && sha256sum -c ./*.sha256
+      - uses: actions/setup-go@v6
+        with:
+          go-version: stable
+      - run: go install github.com/goreleaser/nfpm/v2/cmd/nfpm@v2.47.0
+      - run: sh scripts/test-packages.sh dist "$GITHUB_REF_NAME"
+
+  github-release:
+    needs: [build, package-smoke]
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
@@ -81,12 +116,19 @@ jobs:
         with:
           path: dist
           merge-multiple: true
+      - name: Generate versioned Homebrew formula
+        run: |
+          python3 scripts/homebrew-formula.py "$GITHUB_REF_NAME" dist > dist/co.rb
+          (cd dist && sha256sum co.rb > co.rb.sha256)
+      - uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: dist/co.rb
       - run: gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --generate-notes --title "co $GITHUB_REF_NAME"
         env:
           GH_TOKEN: ${{ github.token }}
 
   crates-io:
-    needs: build
+    needs: [build, package-smoke]
     if: vars.PUBLISH_CRATES_IO == 'true'
     runs-on: ubuntu-24.04
     steps:

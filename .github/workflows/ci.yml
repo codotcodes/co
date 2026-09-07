@@ -25,14 +25,52 @@ jobs:
       - run: cargo test --locked
 
   installer:
-    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        os: [ubuntu-24.04, macos-14]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
-      - run: sudo apt-get update && sudo apt-get install -y shellcheck
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
+      - if: runner.os == 'macOS'
+        run: brew install shellcheck
       - run: shellcheck install.sh scripts/*.sh
       - run: sh -n install.sh scripts/*.sh
       - uses: dtolnay/rust-toolchain@stable
       - run: sh scripts/test-installer.sh
+
+  homebrew:
+    strategy:
+      matrix:
+        os: [macos-14, macos-15-intel]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - run: brew tap codotcodes/co "$GITHUB_WORKSPACE"
+      - run: brew install codotcodes/co/co
+      - run: brew test codotcodes/co/co
+      - run: brew reinstall codotcodes/co/co
+      - run: co version
+      - run: brew uninstall codotcodes/co/co
+
+  packages:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+      - uses: actions/setup-go@v6
+        with:
+          go-version: stable
+      - run: go install github.com/goreleaser/nfpm/v2/cmd/nfpm@v2.47.0
+      - run: cargo build --locked --release --target x86_64-unknown-linux-musl
+      - run: |
+          version="$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -1)"
+          sh scripts/package-linux.sh "$version" x86_64-unknown-linux-musl target/x86_64-unknown-linux-musl/release/co dist
+          sh scripts/test-packages.sh dist "$version"
 
   nix:
     runs-on: ubuntu-24.04

@@ -12,28 +12,7 @@ Linux and macOS:
 curl -fsSL https://raw.githubusercontent.com/codotcodes/co/main/install.sh | sh
 ```
 
-Nix:
-
-```sh
-nix run github:codotcodes/co -- help
-```
-
-Cargo:
-
-```sh
-cargo install co-codes-cli
-```
-
-The release installer supports:
-
-| OS | Architectures |
-|---|---|
-| Linux, glibc or musl | x86_64, ARM64 |
-| macOS | Intel, Apple Silicon |
-
-Windows is intentionally deferred until there is enough demand and committed testing coverage.
-
-The installer defaults to `~/.local/bin`. Set `CO_INSTALL_DIR` to choose another location, or `CO_VERSION=v0.1.0` to install a specific release.
+See the [platform installation guide](docs/install.md) for Homebrew, Debian/Ubuntu, Fedora/RHEL, Arch Linux, Cargo, Nix, direct downloads, and upgrade/uninstall instructions. The installer supports Linux glibc/musl and macOS on x86_64 and ARM64, defaults to `~/.local/bin`, and verifies release checksums. Windows remains deferred.
 
 ## Usage
 
