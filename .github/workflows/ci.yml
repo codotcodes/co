@@ -13,7 +13,7 @@ jobs:
     name: Rust (${{ matrix.os }})
     strategy:
       matrix:
-        os: [ubuntu-24.04, macos-14]
+        os: [blacksmith-4vcpu-ubuntu-2404, blacksmith-6vcpu-macos-15]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
@@ -27,7 +27,7 @@ jobs:
   installer:
     strategy:
       matrix:
-        os: [ubuntu-24.04, macos-14]
+        os: [blacksmith-4vcpu-ubuntu-2404, blacksmith-6vcpu-macos-15]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
@@ -43,7 +43,8 @@ jobs:
   homebrew:
     strategy:
       matrix:
-        os: [macos-14, macos-15-intel]
+        # Blacksmith macOS is ARM64-only; retain native Intel coverage.
+        os: [blacksmith-6vcpu-macos-15, macos-15-intel]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
@@ -55,7 +56,7 @@ jobs:
       - run: brew uninstall codotcodes/co/co
 
   packages:
-    runs-on: ubuntu-24.04
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     steps:
       - uses: actions/checkout@v7
       - run: sudo apt-get update && sudo apt-get install -y musl-tools
@@ -73,7 +74,7 @@ jobs:
           sh scripts/test-packages.sh dist "$version"
 
   nix:
-    runs-on: ubuntu-24.04
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     steps:
       - uses: actions/checkout@v7
       - uses: DeterminateSystems/nix-installer-action@v22

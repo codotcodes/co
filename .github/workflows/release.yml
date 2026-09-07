@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   validate:
-    runs-on: ubuntu-24.04
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     steps:
       - uses: actions/checkout@v7
       - run: sh scripts/check-version.sh "$GITHUB_REF_NAME"
@@ -23,19 +23,20 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-24.04
+          - os: blacksmith-4vcpu-ubuntu-2404
             target: x86_64-unknown-linux-gnu
-          - os: ubuntu-24.04
+          - os: blacksmith-4vcpu-ubuntu-2404
             target: x86_64-unknown-linux-musl
             musl: true
-          - os: ubuntu-24.04-arm
+          - os: blacksmith-4vcpu-ubuntu-2404-arm
             target: aarch64-unknown-linux-gnu
-          - os: ubuntu-24.04-arm
+          - os: blacksmith-4vcpu-ubuntu-2404-arm
             target: aarch64-unknown-linux-musl
             musl: true
+          # Blacksmith macOS is ARM64-only; retain the native Intel build.
           - os: macos-15-intel
             target: x86_64-apple-darwin
-          - os: macos-14
+          - os: blacksmith-6vcpu-macos-15
             target: aarch64-apple-darwin
     runs-on: ${{ matrix.os }}
     steps:
@@ -49,6 +50,9 @@ jobs:
       - name: Configure native musl linker
         if: matrix.target == 'aarch64-unknown-linux-musl'
         run: echo 'CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=musl-gcc' >> "$GITHUB_ENV"
+      - name: Preserve Apple Silicon macOS compatibility
+        if: matrix.target == 'aarch64-apple-darwin'
+        run: echo 'MACOSX_DEPLOYMENT_TARGET=14.0' >> "$GITHUB_ENV"
       - run: cargo build --locked --release --target "${{ matrix.target }}"
       - name: Package
         shell: bash
@@ -89,9 +93,9 @@ jobs:
     strategy:
       matrix:
         include:
-          - os: ubuntu-24.04
+          - os: blacksmith-4vcpu-ubuntu-2404
             target: x86_64-unknown-linux-musl
-          - os: ubuntu-24.04-arm
+          - os: blacksmith-4vcpu-ubuntu-2404-arm
             target: aarch64-unknown-linux-musl
     runs-on: ${{ matrix.os }}
     steps:
@@ -109,7 +113,7 @@ jobs:
 
   github-release:
     needs: [build, package-smoke]
-    runs-on: ubuntu-24.04
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     steps:
       - uses: actions/checkout@v7
       - uses: actions/download-artifact@v8
@@ -130,7 +134,7 @@ jobs:
   crates-io:
     needs: [build, package-smoke]
     if: vars.PUBLISH_CRATES_IO == 'true'
-    runs-on: ubuntu-24.04
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
