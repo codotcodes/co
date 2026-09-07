@@ -4,6 +4,8 @@ All notable changes are documented here. This project follows semantic versionin
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-09-07
+
 - Add a Homebrew formula and release packaging for Debian/Ubuntu, Fedora/RHEL, and Arch Linux on x86_64 and ARM64.
 - Document installation, upgrades, removal, and PATH setup in one platform-organized guide.
 - Pin installer downloads to one release, use portable static Linux binaries by default, and replace binaries atomically after checksum verification.
@@ -30,7 +32,8 @@ All notable changes are documented here. This project follows semantic versionin
 - Validate repository access in `clone` while smart HTTP remains unavailable.
 - Add Linux and macOS release packaging, Nix support, and the global installer.
 
-[Unreleased]: https://github.com/codotcodes/co/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/codotcodes/co/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/codotcodes/co/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/codotcodes/co/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/codotcodes/co/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/codotcodes/co/releases/tag/v0.1.0
