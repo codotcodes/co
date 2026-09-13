@@ -66,6 +66,8 @@ Configuration is stored in `~/.config/co/config.json`, or `$XDG_CONFIG_HOME/co/c
 
 Command-line options override these defaults. Set `CO_API_URL` to override the configured `api_url` or use a non-production API endpoint.
 
+Set `CO_CONFIG_DIR` to a nonempty directory path to store `config.json` and its lock file there instead. This takes precedence over `XDG_CONFIG_HOME` and `HOME` and isolates CLI sessions without changing the desktop or browser configuration inherited during login. An empty `CO_CONFIG_DIR` uses the default configuration location.
+
 ## Build
 
 ```sh

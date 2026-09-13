@@ -4,6 +4,8 @@ All notable changes are documented here. This project follows semantic versionin
 
 ## [Unreleased]
 
+- Add `CO_CONFIG_DIR` to isolate CLI sessions while preserving the host's browser preferences during login.
+
 ## [0.4.0] - 2026-09-07
 
 - Add a Homebrew formula and release packaging for Debian/Ubuntu, Fedora/RHEL, and Arch Linux on x86_64 and ARM64.

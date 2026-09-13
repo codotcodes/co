@@ -301,6 +301,7 @@ fn help() {
     println!("      --reason <text>             explain the task to the approver");
     println!();
     println!("Configuration: ~/.config/co/config.json (or $XDG_CONFIG_HOME/co/config.json).");
+    println!("Set CO_CONFIG_DIR to override only the CLI configuration directory.");
     println!("Environment: CO_API_URL overrides https://api.co.codes.");
 }
 
@@ -1465,10 +1466,14 @@ fn api_url(config: &Config) -> String {
 }
 
 fn config_path() -> Result<PathBuf, String> {
+    if let Some(root) = std::env::var_os("CO_CONFIG_DIR").filter(|root| !root.is_empty()) {
+        return Ok(PathBuf::from(root).join("config.json"));
+    }
     if let Some(root) = std::env::var_os("XDG_CONFIG_HOME") {
         return Ok(PathBuf::from(root).join("co/config.json"));
     }
-    let home = std::env::var_os("HOME").ok_or("HOME is unset; set XDG_CONFIG_HOME for co")?;
+    let home = std::env::var_os("HOME")
+        .ok_or("HOME is unset; set CO_CONFIG_DIR or XDG_CONFIG_HOME for co")?;
     Ok(PathBuf::from(home).join(".config/co/config.json"))
 }
 

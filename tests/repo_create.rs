@@ -31,6 +31,7 @@ impl TestConfig {
             .args(["repo", "create"])
             .args(args)
             .env("XDG_CONFIG_HOME", &self.0)
+            .env_remove("CO_CONFIG_DIR")
             .env("CO_API_URL", api)
             .env("NO_PROXY", "127.0.0.1")
             .output()
