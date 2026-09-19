@@ -213,6 +213,9 @@ fn run(args: Vec<String>) -> Result<(), String> {
         "agent" if args.get(1).map(String::as_str) == Some("list") && args.len() == 2 => {
             list_agents()
         }
+        "agent" if args.get(1).map(String::as_str) == Some("attest") => {
+            attest_agent_commits(&args[2..])
+        }
         "access" if args.get(1).map(String::as_str) == Some("request") => {
             let config = load_config()?;
             request_agent_access(parse_access_request(&args[2..])?, config)
@@ -255,7 +258,7 @@ fn run(args: Vec<String>) -> Result<(), String> {
         "repo" => Err(format!(
             "usage: co repo view <owner/repo>\n{REPO_CREATE_USAGE}"
         )),
-        "agent" => Err("usage: co agent register <name> | co agent list".into()),
+        "agent" => Err("usage: co agent register <name> | co agent list | co agent attest <owner/repo> <commit-oid>...".into()),
         "access" => Err("usage: co access request|wait|view".into()),
         other => Err(format!("unknown command {other:?} (try: co help)")),
     }
@@ -277,6 +280,7 @@ fn help() {
     println!("  repo create [options] <[owner/]name>  create a repository");
     println!("  agent register <name>    register a local agent identity");
     println!("  agent list               list local agent identities");
+    println!("  agent attest <repo> <oid>...  attest commits using CO_AGENT_ID and a push grant");
     println!("  access request [options] <repo>  request human-approved agent access");
     println!("  access wait [request]    resume waiting for human approval");
     println!("  access view <owner/repo> view a repo with an approved agent grant");
@@ -993,21 +997,43 @@ fn agent_repo_view(spec: &str) -> Result<(), String> {
 }
 
 fn mint_agent_access_token(config: &Config, owner: &str, repo: &str) -> Result<String, String> {
-    let now = unix_now()?;
+    mint_agent_token(config, owner, repo, None, "pull")
+}
+
+fn select_agent_grant<'a>(
+    config: &'a Config,
+    owner: &str,
+    repo: &str,
+    agent_id: Option<&str>,
+    operation: &str,
+    now: u64,
+) -> Result<&'a AgentGrant, String> {
     let mut grants = config.agent_grants.iter().filter(|grant| {
         grant.owner == owner
             && grant.repo == repo
+            && agent_id.is_none_or(|id| grant.agent_id == id)
             && grant.expires_unix > now
-            && grant.operations.iter().any(|operation| operation == "pull")
+            && grant.operations.iter().any(|op| op == operation)
     });
     let grant = grants.next().ok_or_else(|| {
-        format!("no live pull grant for {owner}/{repo}; run `co access request {owner}/{repo}`")
+        format!("no live {operation} grant for {owner}/{repo}; request access for the selected agent with `co access request --agent <id> --push {owner}/{repo}`")
     })?;
     if grants.next().is_some() {
         return Err(format!(
             "multiple live agent grants for {owner}/{repo}; use a separate local co config per agent"
         ));
     }
+    Ok(grant)
+}
+
+fn mint_agent_token(
+    config: &Config,
+    owner: &str,
+    repo: &str,
+    agent_id: Option<&str>,
+    operation: &str,
+) -> Result<String, String> {
+    let grant = select_agent_grant(config, owner, repo, agent_id, operation, unix_now()?)?;
     let token: AgentAccessToken = decode(
         client()?
             .post(format!(
@@ -1020,6 +1046,51 @@ fn mint_agent_access_token(config: &Config, owner: &str, repo: &str) -> Result<S
             .map_err(network_error)?,
     )?;
     Ok(token.access_token)
+}
+
+fn selected_agent_id() -> Result<Option<String>, String> {
+    match std::env::var("CO_AGENT_ID") {
+        Ok(id)
+            if !id.is_empty()
+                && id.len() <= 64
+                && id.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-') =>
+        {
+            Ok(Some(id))
+        }
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        _ => Err("CO_AGENT_ID must be a registered agent ID".into()),
+    }
+}
+
+fn attest_agent_commits(args: &[String]) -> Result<(), String> {
+    if args.len() < 2 || args.len() > 101 {
+        return Err("usage: CO_AGENT_ID=<id> co agent attest <owner/repo> <commit-oid>... (up to 100 explicit commits)".into());
+    }
+    let (owner, repo) = repo_spec(&args[0])?;
+    if args[1..]
+        .iter()
+        .any(|oid| !matches!(oid.len(), 40 | 64) || !oid.bytes().all(|c| c.is_ascii_hexdigit()))
+    {
+        return Err("attestation requires full 40- or 64-character commit object IDs".into());
+    }
+    let agent_id = selected_agent_id()?
+        .ok_or("set CO_AGENT_ID to the registered agent that worked on these commits")?;
+    let config = load_config()?;
+    let token = mint_agent_token(&config, owner, repo, Some(&agent_id), "push")?;
+    for oid in &args[1..] {
+        let oid = oid.to_ascii_lowercase();
+        let response = client()?
+            .post(format!(
+                "{}/repos/{owner}/{repo}/commits/{oid}/provenance",
+                api_url(&config)
+            ))
+            .bearer_auth(&token)
+            .send()
+            .map_err(network_error)?;
+        let _: Value = decode(response)?;
+        println!("Attested {oid} as {agent_id}");
+    }
+    Ok(())
 }
 
 fn unix_now() -> Result<u64, String> {
@@ -1046,12 +1117,38 @@ fn git_credential(operation: &str) -> Result<(), String> {
         .map_err(|error| format!("unable to read Git credential request: {error}"))?;
     let credential = parse_credential(&input);
 
-    if operation == "get" && credential.in_scope() {
-        if let Some(token) = load_config()?.session_token {
-            print!("username=co\npassword={token}\n\n");
+    if operation == "get" {
+        let selected = selected_agent_id();
+        if !matches!(&selected, Ok(None)) {
+            // Explicit agent mode must never fall through to a human credential
+            // or another configured helper, including on a malformed request.
+            let token = selected.and_then(|id| {
+                if !credential.in_scope() {
+                    return Err("agent credential request is outside git.co.codes".into());
+                }
+                let path = credential.path.ok_or(
+                    "agent credentials require credential.useHttpPath=true; run co link again",
+                )?;
+                let (owner, repo) = repo_spec(path.strip_suffix(".git").unwrap_or(path))?;
+                mint_agent_token(&load_config()?, owner, repo, id.as_deref(), "push")
+            });
+            match token {
+                Ok(token) => print!("username=co\npassword={token}\n\n"),
+                Err(error) => {
+                    println!("quit=true\n");
+                    return Err(error);
+                }
+            }
             std::io::stdout()
                 .flush()
                 .map_err(|error| format!("unable to write Git credential response: {error}"))?;
+        } else if credential.in_scope() {
+            if let Some(token) = load_config()?.session_token {
+                print!("username=co\npassword={token}\n\n");
+                std::io::stdout()
+                    .flush()
+                    .map_err(|error| format!("unable to write Git credential response: {error}"))?;
+            }
         }
     }
     Ok(())
@@ -1061,6 +1158,7 @@ fn git_credential(operation: &str) -> Result<(), String> {
 struct GitCredential<'a> {
     protocol: Option<&'a str>,
     host: Option<&'a str>,
+    path: Option<&'a str>,
 }
 
 impl GitCredential<'_> {
@@ -1082,6 +1180,7 @@ fn parse_credential(input: &str) -> GitCredential<'_> {
         match key {
             "protocol" => credential.protocol = Some(value),
             "host" => credential.host = Some(value),
+            "path" => credential.path = Some(value),
             _ => {}
         }
     }
@@ -1240,6 +1339,8 @@ fn clone_command_args(
         "credential.helper=".into(),
         "-c".into(),
         format!("credential.https://{GIT_HOST}.helper={helper}"),
+        "-c".into(),
+        format!("credential.https://{GIT_HOST}.useHttpPath=true"),
         "clone".into(),
         "--origin".into(),
         upstream_name.into(),
@@ -1340,6 +1441,17 @@ fn configure_repo_helper(directory: &Path, helper: &str) -> Result<(), String> {
             helper.into(),
         ],
         "configure repository credential helper",
+    )?;
+    run_git(
+        &[
+            "-C".into(),
+            directory.into(),
+            "config".into(),
+            "--local".into(),
+            format!("credential.https://{GIT_HOST}.useHttpPath"),
+            "true".into(),
+        ],
+        "configure repository-scoped credentials",
     )
 }
 
@@ -1580,7 +1692,8 @@ mod tests {
             credential,
             GitCredential {
                 protocol: Some("https"),
-                host: Some("git.co.codes:443")
+                host: Some("git.co.codes:443"),
+                path: Some("hackr/www.git")
             }
         );
         assert!(credential.in_scope());
@@ -1588,6 +1701,25 @@ mod tests {
         assert!(!parse_credential("protocol=http\nhost=git.co.codes\n\n").in_scope());
         assert!(!parse_credential("protocol=https\nhost=git.co.codes:444\n\n").in_scope());
         assert!(!parse_credential("protocol=https\nhost=evil.example\n\n").in_scope());
+    }
+
+    #[test]
+    fn selected_grants_require_exact_agent_repository_operation_and_lifetime() {
+        let mut config = Config::default();
+        config.agent_grants.push(AgentGrant {
+            agent_id: "agent".into(),
+            owner: "owner".into(),
+            repo: "repo".into(),
+            grant_id: "grant".into(),
+            lineage_token: "secret".into(),
+            operations: vec!["pull".into()],
+            expires_unix: 200,
+        });
+        assert!(select_agent_grant(&config, "owner", "repo", Some("agent"), "pull", 100).is_ok());
+        assert!(select_agent_grant(&config, "owner", "repo", Some("agent"), "push", 100).is_err());
+        assert!(select_agent_grant(&config, "owner", "repo", Some("other"), "pull", 100).is_err());
+        assert!(select_agent_grant(&config, "owner", "other", Some("agent"), "pull", 100).is_err());
+        assert!(select_agent_grant(&config, "owner", "repo", Some("agent"), "pull", 200).is_err());
     }
 
     #[test]
@@ -1605,6 +1737,8 @@ mod tests {
                 "credential.helper=",
                 "-c",
                 "credential.https://git.co.codes.helper=!'/usr/local/bin/co' git-credential",
+                "-c",
+                "credential.https://git.co.codes.useHttpPath=true",
                 "clone",
                 "--origin",
                 "upstream",

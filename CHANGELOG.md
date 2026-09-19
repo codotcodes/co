@@ -4,6 +4,9 @@ All notable changes are documented here. This project follows semantic versionin
 
 ## [Unreleased]
 
+- Add explicit agent Git credentials through `CO_AGENT_ID`, scoped to the approved repository and refusing human-credential fallback.
+- Add `co agent attest` to record authenticated participation in explicitly selected commits after pushing.
+
 ## [0.5.0] - 2026-09-13
 
 - Add `CO_CONFIG_DIR` to isolate CLI sessions while preserving the host's browser preferences during login.

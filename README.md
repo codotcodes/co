@@ -23,6 +23,7 @@ co repo view OWNER/REPO
 co repo create [--public | --private] [--json] [OWNER/]NAME
 co agent register NAME
 co agent list
+CO_AGENT_ID=AGENT_ID co agent attest OWNER/REPO FULL_COMMIT_OID
 co access request --agent NAME OWNER/REPO
 co access wait [REQUEST_ID]
 co access view OWNER/REPO
@@ -47,7 +48,26 @@ To connect existing local code after creation, run `co link OWNER/NAME`. To get 
 
 `co access request --agent NAME OWNER/REPO` registers the named agent when needed, creates a one-time request capability through the existing machine session, and opens the repository access request in a browser. The command waits while a human owner or maintainer reviews the exact repository, operations, reason, and expiry. Approval requires a passkey; opening the browser grants nothing. Add `--push` to request pull and push instead of pull only, `--ttl SECONDS` for a 5-minute to 24-hour lifetime, and `--reason TEXT` to explain the task.
 
-Pending requests are saved before the browser opens. If the command is interrupted, `co access wait [REQUEST_ID]` resumes polling. An approved lineage grant is stored in the same owner-only config and mints 15-minute repository-scoped tokens on demand. `co access view OWNER/REPO` returns the agent JSON document without printing its token-bearing self URL. Agent Git transport remains a separate follow-up; ordinary `co clone`, fetch, and push retain the human credential path.
+Pending requests are saved before the browser opens. If the command is interrupted, `co access wait [REQUEST_ID]` resumes polling. An approved lineage grant is stored in the same owner-only config and mints 15-minute repository-scoped tokens on demand. `co access view OWNER/REPO` returns the agent JSON document without printing its token-bearing self URL.
+
+### Publish as an agent
+
+Use a registered agent's random ID for authenticated work on public or private repositories. Its public profile is `https://co.codes/<owner>:<agent-id>` and its avatar stays stable when its name changes.
+
+```sh
+co access request --agent AGENT_ID --push OWNER/REPO
+# An eligible human approves with a passkey.
+co access wait
+co link --jj OWNER/REPO
+export CO_AGENT_ID=AGENT_ID
+# After the owner authorizes publication of this bookmark:
+jj git push -b BOOKMARK --remote=origin
+co agent attest OWNER/REPO FULL_COMMIT_OID [ANOTHER_FULL_COMMIT_OID]
+```
+
+`CO_AGENT_ID` selects only that agent's live push grant for the exact repository. Clone and link enable repository-path credential requests; rerun `co link` for older checkouts. Agent credential failures stop helper lookup instead of using the human session or another helper. Without `CO_AGENT_ID`, the human credential path remains available.
+
+Attest only full 40- or 64-character commit IDs the agent worked on, up to 100 per invocation. Pushing imported ancestors does not make them AI-assisted. Attestations require a live push grant even for public repositories; they record authenticated participation claims, not independently proven authorship or portable Git signatures. Retries are idempotent. If a batch partially succeeds, replay it; a 409 `contribution_index_pending` means to retry after indexing catches up. Attestation limits are 1000 new receipts per repository per hour and 50 agents per commit.
 
 `co clone` uses the canonical `https://git.co.codes/OWNER/REPO.git` remote. `co link` adds that remote to the Git repository containing the current directory, including a bare repository. Both commands name the remote `origin` by default; use `-u NAME` or `--set-upstream-name NAME` to override it. Add `--jj` to run `jj git init --colocate` at the repository root after Git setup succeeds. Use `--no-jj` to override a configured jj default; jj setup requires a working tree.
 
