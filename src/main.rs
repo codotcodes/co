@@ -11,6 +11,7 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 mod machine;
+mod workflow;
 
 const DEFAULT_API_URL: &str = "https://api.co.codes";
 const GIT_HOST: &str = "git.co.codes";
@@ -212,6 +213,7 @@ fn run(args: Vec<String>) -> Result<(), String> {
         "whoami" => whoami(),
         "doctor" => doctor(),
         "machine" => machine::run(&args[1..]),
+        "workflow" => workflow::run(&args[1..]),
         "agent" if args.get(1).map(String::as_str) == Some("register") && args.len() == 3 => {
             register_agent(required_arg(&args, 2, "usage: co agent register <name>")?)
         }
@@ -295,6 +297,7 @@ fn help() {
     println!("  machine enroll [options] enroll with a setup key or owner session");
     println!("  machine run <id>        send heartbeats in the foreground");
     println!("  machine heartbeat <id>  send one heartbeat");
+    println!("  workflow check [file]   validate local workflow plans");
     println!("  doctor                   check API and authentication");
     println!("  version                  print version");
     println!();

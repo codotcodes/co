@@ -33,6 +33,7 @@ co machine enroll --setup-key
 co machine enroll --owner OWNER --label LABEL
 co machine list
 co machine run MACHINE_ID
+co workflow check [FILE]
 co doctor
 co logout
 ```
@@ -44,6 +45,8 @@ co logout
 `co machine enroll --setup-key` reads a one-time setup key from standard input, then detects the machine's OS, architecture, vCPUs and RAM. An administrator must first label a public machine in the admin dashboard and provide its setup key. The key is never passed as a command argument or printed. An owner or maintainer can instead use `co machine enroll --owner OWNER --label LABEL` after `co login` to register a personal or organization machine without a setup key; public machines cannot self-register. Owner-controlled attributes and resources in the dashboard can override detected values.
 
 Enrollment saves a separate machine credential in the owner-only CLI config for the exact API used at enrollment. `co machine list` shows enrolled machine IDs without credentials. Start `co machine run MACHINE_ID` in the foreground; it sends a heartbeat every 30 seconds, and can be restarted with the same ID after a disconnect. `co machine heartbeat MACHINE_ID` sends one heartbeat to verify a connection. A registered machine is shown as offline after 90 seconds without a heartbeat. Keep the same `CO_API_URL` when using a non-production API. The machine harness will receive and execute queued jobs when workflow dispatch is available.
+
+`co workflow check` validates `.co/workflows/*.ts` in the current repository, or a single direct file with `co workflow check .co/workflows/verify.ts`. Install `@cocodes/workflows` into the repository first and run the command at the repository root. The checker requires Bun, parses TypeScript without evaluating repository code or contacting the API, and reports file/line diagnostics. Dynamic job generation is unsupported in v1.
 
 `co repo create NAME` creates an empty private repository in your personal namespace. Use `OWNER/NAME` for an explicit namespace you can write to, and `--public` to make the repository public. Creation is non-interactive and uses the existing `co login` machine session, so a coding agent can run it on your behalf with that session's permissions. Repository-scoped agent grants do not authorize repository creation.
 
