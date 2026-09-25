@@ -29,11 +29,21 @@ co access wait [REQUEST_ID]
 co access view OWNER/REPO
 co clone [OPTIONS] OWNER/REPO [DIRECTORY]
 co link [OPTIONS] OWNER/REPO
+co machine enroll --setup-key
+co machine enroll --owner OWNER --label LABEL
+co machine list
+co machine run MACHINE_ID
 co doctor
 co logout
 ```
 
 `co login` opens a browser for explicit device authorization. The local session is stored under the platform configuration directory with owner-only permissions. It is never written to Git configuration or passed as a command argument.
+
+### Machines
+
+`co machine enroll --setup-key` reads a one-time setup key from standard input, then detects the machine's OS, architecture, vCPUs and RAM. An administrator must first label a public machine in the admin dashboard and provide its setup key. The key is never passed as a command argument or printed. An owner or maintainer can instead use `co machine enroll --owner OWNER --label LABEL` after `co login` to register a personal or organization machine without a setup key; public machines cannot self-register. Owner-controlled attributes and resources in the dashboard can override detected values.
+
+Enrollment saves a separate machine credential in the owner-only CLI config for the exact API used at enrollment. `co machine list` shows enrolled machine IDs without credentials. Start `co machine run MACHINE_ID` in the foreground; it sends a heartbeat every 30 seconds, and can be restarted with the same ID after a disconnect. `co machine heartbeat MACHINE_ID` sends one heartbeat to verify a connection. A registered machine is shown as offline after 90 seconds without a heartbeat. Keep the same `CO_API_URL` when using a non-production API. The machine harness will receive and execute queued jobs when workflow dispatch is available.
 
 `co repo create NAME` creates an empty private repository in your personal namespace. Use `OWNER/NAME` for an explicit namespace you can write to, and `--public` to make the repository public. Creation is non-interactive and uses the existing `co login` machine session, so a coding agent can run it on your behalf with that session's permissions. Repository-scoped agent grants do not authorize repository creation.
 

@@ -10,6 +10,8 @@ use std::process::{Command, ExitCode};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+mod machine;
+
 const DEFAULT_API_URL: &str = "https://api.co.codes";
 const GIT_HOST: &str = "git.co.codes";
 const DEVICE_CLIENT_ID: &str = "co-cli";
@@ -36,6 +38,8 @@ struct Config {
     pending_agent_requests: Vec<PendingAgentRequest>,
     #[serde(default)]
     agent_grants: Vec<AgentGrant>,
+    #[serde(default)]
+    machines: Vec<machine::MachineIdentity>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -207,6 +211,7 @@ fn run(args: Vec<String>) -> Result<(), String> {
         "logout" => logout(),
         "whoami" => whoami(),
         "doctor" => doctor(),
+        "machine" => machine::run(&args[1..]),
         "agent" if args.get(1).map(String::as_str) == Some("register") && args.len() == 3 => {
             register_agent(required_arg(&args, 2, "usage: co agent register <name>")?)
         }
@@ -287,6 +292,9 @@ fn help() {
     println!("  clone [options] <repo>   clone a repository over HTTPS");
     println!("  link [options] <repo>    link the local Git repository");
     println!("  git-credential <op>      serve credentials to Git");
+    println!("  machine enroll [options] enroll with a setup key or owner session");
+    println!("  machine run <id>        send heartbeats in the foreground");
+    println!("  machine heartbeat <id>  send one heartbeat");
     println!("  doctor                   check API and authentication");
     println!("  version                  print version");
     println!();

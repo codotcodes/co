@@ -19,6 +19,7 @@ path = "src/main.rs"
 fs2 = "0.4"
 httpdate = "1"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+rpassword = "7.4.0"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 webbrowser = "1"
