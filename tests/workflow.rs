@@ -29,11 +29,20 @@ fn workflow_check_passes_one_file_as_an_argument_and_returns_failure_status() {
         .args(["workflow", "check", ".co/workflows/example.ts"])
         .current_dir(&root)
         .env("PATH", &bin)
-        .env("EXPECTED_CHECKER", package.join("check.ts"))
+        // macOS resolves /var to /private/var when the CLI calls current_dir().
+        .env(
+            "EXPECTED_CHECKER",
+            fs::canonicalize(package.join("check.ts")).unwrap(),
+        )
         .output()
         .unwrap();
     assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stdout).contains("diagnostic: bad selector"));
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("diagnostic: bad selector"),
+        "status: {}; stderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
     assert!(String::from_utf8_lossy(&output.stderr).contains("workflow check failed"));
     fs::remove_dir_all(&root).unwrap();
 }
