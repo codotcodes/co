@@ -93,14 +93,22 @@ fn valid_job(job: &Assignment, api_url: &str) -> bool {
     let Ok(url) = reqwest::Url::parse(&job.checkout_url) else {
         return false;
     };
-    let local_api = reqwest::Url::parse(api_url).ok().is_some_and(|api| {
+    let api = reqwest::Url::parse(api_url).ok();
+    let local_api = api.as_ref().is_some_and(|api| {
         matches!(api.host_str(), Some("127.0.0.1" | "localhost"))
             || api
                 .host_str()
                 .is_some_and(|host| host.ends_with(".localhost"))
     });
-    let trusted_origin = url.scheme() == "https"
-        && matches!(url.host_str(), Some("git.co.codes" | "co.codes"))
+    let hosted_git = api.as_ref().is_some_and(|api| {
+        api.scheme() == "https"
+            && matches!(
+                (api.host_str(), url.host_str()),
+                (Some("api.co.codes"), Some("git.co.codes" | "co.codes"))
+                    | (Some("api.codevved.com"), Some("git.codevved.com"))
+            )
+    });
+    let trusted_origin = url.scheme() == "https" && url.port().is_none() && hosted_git
         || local_api
             && url.scheme() == "http"
             && matches!(url.host_str(), Some("127.0.0.1" | "localhost"))
@@ -383,6 +391,7 @@ mod tests {
             ram_mib: 128,
         };
         assert!(valid_job(&job, "https://api.co.codes"));
+        assert!(!valid_job(&job, "https://api.codevved.com"));
         assert!(!valid_job(
             &Assignment {
                 checkout_url: "http://127.0.0.1:7700/owner/repo.git".into(),
@@ -401,6 +410,17 @@ mod tests {
         };
         assert!(valid_job(&local, "https://api.co.localhost"));
         assert!(!valid_job(&local, "https://api.co.localhost.evil.example"));
+
+        let mut staging = Assignment {
+            checkout_url: "https://git.codevved.com/owner/repo.git".into(),
+            ..local
+        };
+        assert!(valid_job(&staging, "https://api.codevved.com"));
+        assert!(!valid_job(&staging, "https://api.co.codes"));
+        staging.checkout_url = "https://git.codevved.com.evil.example/owner/repo.git".into();
+        assert!(!valid_job(&staging, "https://api.codevved.com"));
+        staging.checkout_url = "https://git.codevved.com:444/owner/repo.git".into();
+        assert!(!valid_job(&staging, "https://api.codevved.com"));
     }
 
     #[test]
