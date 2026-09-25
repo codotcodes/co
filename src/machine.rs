@@ -5,6 +5,7 @@ use std::io::{self, BufRead, IsTerminal};
 use std::process::Command;
 use std::thread;
 use std::time::Duration;
+mod runner;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub(super) struct MachineIdentity {
@@ -242,7 +243,12 @@ pub(super) fn run(args: &[String]) -> Result<(), String> {
             eprintln!("Machine {id} connected. Stop with Ctrl-C.");
             loop {
                 match heartbeat(id) {
-                    Ok(()) => {},
+                    Ok(()) => {
+                        let config = load_config()?;
+                        let machine = config.machines.iter().find(|machine| machine.id == *id)
+                            .ok_or("machine not enrolled")?;
+                        if let Err(message) = runner::poll(machine) { eprintln!("{message}"); }
+                    },
                     Err(HeartbeatError::Temporary(message)) => eprintln!("{message}; retrying in 30 seconds"),
                     Err(HeartbeatError::Permanent(message)) => return Err(message),
                 }
