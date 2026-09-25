@@ -1,4 +1,5 @@
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -13,11 +14,22 @@ fn workflow_check_passes_one_file_as_an_argument_and_returns_failure_status() {
     fs::create_dir_all(&package).unwrap();
     fs::write(
         package.join("check.ts"),
-        "if (process.argv[2] !== '.co/workflows/example.ts') process.exit(3); console.log('diagnostic: bad selector'); process.exit(1);",
+        "// The CLI must pass this file to Bun.",
+    )
+    .unwrap();
+    let bin = root.join("bin");
+    fs::create_dir(&bin).unwrap();
+    let bun = bin.join("bun");
+    fs::write(
+        &bun,
+        "#!/bin/sh\n[ \"$1\" = run ] && [ \"$2\" = \"$EXPECTED_CHECKER\" ] && [ \"$3\" = .co/workflows/example.ts ] && [ \"$#\" -eq 3 ] || exit 3\nprintf '%s\\n' 'diagnostic: bad selector'\nexit 1\n",
     ).unwrap();
+    fs::set_permissions(&bun, fs::Permissions::from_mode(0o755)).unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_co"))
         .args(["workflow", "check", ".co/workflows/example.ts"])
         .current_dir(&root)
+        .env("PATH", &bin)
+        .env("EXPECTED_CHECKER", package.join("check.ts"))
         .output()
         .unwrap();
     assert!(!output.status.success());
