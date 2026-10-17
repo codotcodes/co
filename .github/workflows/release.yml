@@ -15,6 +15,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - run: sh scripts/check-version.sh "$GITHUB_REF_NAME"
+      - run: python3 scripts/test-release-notes.py
       - run: cargo publish --locked --dry-run
 
   build:
@@ -178,7 +179,9 @@ jobs:
       - uses: actions/attest-build-provenance@v4
         with:
           subject-path: dist/co.rb
-      - run: gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --generate-notes --title "co $GITHUB_REF_NAME"
+      - name: Extract curated release notes
+        run: python3 scripts/release-notes.py "$GITHUB_REF_NAME" > release-notes.md
+      - run: gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --notes-file release-notes.md --title "co $GITHUB_REF_NAME"
         env:
           GH_TOKEN: ${{ github.token }}
 
