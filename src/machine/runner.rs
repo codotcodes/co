@@ -10,18 +10,21 @@ use std::io::Write;
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::{
-    Arc,
+    Arc, Mutex,
     atomic::{AtomicBool, Ordering},
 };
 use std::thread;
 use std::time::{Duration, Instant};
 
 const STEP_TIMEOUT: Duration = Duration::from_secs(600);
+const LEASE_WINDOW: Duration = Duration::from_secs(70);
 const IMAGE: &str = "docker.io/library/alpine@sha256:1f3591b8a02ea153f41c5bba878ad477f63ab3d19349762cb77504db02a23e15";
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct Assignment {
+    #[serde(skip)]
+    machine_id: String,
     id: String,
     assignment_token: String,
     checkout_url: String,
@@ -68,18 +71,144 @@ fn post(
         .map_err(network_error)
 }
 
-pub(super) fn poll(machine: &MachineIdentity) -> Result<(), String> {
+pub(super) struct Runner {
+    active: Vec<(u32, thread::JoinHandle<()>)>,
+    cpus: u32,
+    memory_mib: u64,
+    halt: Arc<AtomicBool>,
+}
+
+impl Runner {
+    pub(super) fn new() -> Result<Self, String> {
+        Ok(Self {
+            active: Vec::new(),
+            cpus: thread::available_parallelism()
+                .map_err(|e| e.to_string())?
+                .get() as u32,
+            memory_mib: host_memory_budget()?,
+            halt: Arc::new(AtomicBool::new(false)),
+        })
+    }
+
+    pub(super) fn poll(&mut self, machine: &MachineIdentity) -> Result<(), String> {
+        self.active.retain(|(_, handle)| !handle.is_finished());
+        let used: u32 = self.active.iter().map(|(cpus, _)| cpus).sum();
+        if used >= self.cpus {
+            return Ok(());
+        }
+        let requested_at = Instant::now();
+        let Some(mut job) = next_job(machine)? else {
+            return Ok(());
+        };
+        if !valid_job(&job, &machine.api_url) || job.vcpus > self.cpus - used {
+            return finish(machine, &job, vec![], false);
+        }
+        // Memory is host policy, not a placement request. The proportional budget
+        // keeps concurrent jobs below 80% of the host's detected memory.
+        job.ram_mib = memory_budget(self.memory_mib, self.cpus, job.vcpus);
+        job.machine_id = machine.id.clone();
+        let cpus = job.vcpus;
+        let machine = machine.clone();
+        let halt = self.halt.clone();
+        let handle = thread::spawn(move || {
+            eprintln!("Running job {} on machine {}", job.id, machine.id);
+            let (results, success) = execute(&machine, &job, requested_at, halt);
+            if let Err(message) = finish(&machine, &job, results, success) {
+                eprintln!("Job {}: {message}", job.id);
+            }
+        });
+        self.active.push((cpus, handle));
+        Ok(())
+    }
+}
+
+fn host_memory_budget() -> Result<u64, String> {
+    let mut memory = super::ram_mib()?;
+    #[cfg(target_os = "linux")]
+    if let Ok(limit) = std::fs::read_to_string("/sys/fs/cgroup/memory.max") {
+        if let Ok(bytes) = limit.trim().parse::<u64>() {
+            memory = memory.min(bytes / (1024 * 1024));
+        }
+    }
+    Ok(memory)
+}
+
+pub(super) fn prepare(machine_id: &str) -> Result<std::fs::File, String> {
+    use fs2::FileExt;
+    if machine_id.is_empty()
+        || !machine_id
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || c == b'-')
+    {
+        return Err("invalid machine ID".into());
+    }
+    let path = crate::config_path()?.with_file_name(format!("runner-{machine_id}.lock"));
+    #[cfg(windows)]
+    let file = crate::windows_config::open_lock(&path).map_err(|e| e.to_string())?;
+    #[cfg(not(windows))]
+    let file = {
+        let mut options = std::fs::OpenOptions::new();
+        options.read(true).write(true).create(true).truncate(false);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+        }
+        options.open(path).map_err(|e| e.to_string())?
+    };
+    file.try_lock_exclusive()
+        .map_err(|_| "machine runner is already connected".to_owned())?;
+    // A crashed runner may have left containers behind. Stop only this enrollment's
+    // labeled containers before allowing any fresh assignments on restart.
+    let status = Command::new("podman")
+        .args([
+            "rm",
+            "--force",
+            "--time=0",
+            "--filter",
+            &format!("label=io.co.codes.machine={machine_id}"),
+        ])
+        .status()
+        .map_err(|e| format!("unable to clean up previous jobs: {e}"))?;
+    if !status.success() {
+        return Err("unable to stop previous job containers".into());
+    }
+    Ok(file)
+}
+
+impl Drop for Runner {
+    fn drop(&mut self) {
+        self.halt.store(true, Ordering::Relaxed);
+        for (_, handle) in self.active.drain(..) {
+            let _ = handle.join();
+        }
+    }
+}
+
+fn memory_budget(memory_mib: u64, cpus: u32, requested: u32) -> u32 {
+    (memory_mib.saturating_mul(4) / 5 * u64::from(requested) / u64::from(cpus.max(1)))
+        .clamp(1, u64::from(u32::MAX)) as u32
+}
+
+fn next_job(machine: &MachineIdentity) -> Result<Option<Assignment>, String> {
     let response = post(
         machine,
         "/machine-enrollment/next-job",
-        serde_json::json!({"capabilities": ["workflow-environment-v1"]}),
+        serde_json::json!({"capabilities": ["workflow-environment-v1", "cpu-slots-v1"]}),
     )?;
     if response.status() == reqwest::StatusCode::NO_CONTENT {
-        return Ok(());
+        return Ok(None);
     }
     let job: NextJob = decode(response)?;
-    eprintln!("Running job {} on machine {}", job.job.id, machine.id);
-    let (results, success) = execute(machine, &job.job);
+    Ok(Some(job.job))
+}
+
+fn finish(
+    machine: &MachineIdentity,
+    job: &Assignment,
+    results: Vec<StepResult>,
+    success: bool,
+) -> Result<(), String> {
     let hash = live_logs::digest(
         results
             .iter()
@@ -88,8 +217,8 @@ pub(super) fn poll(machine: &MachineIdentity) -> Result<(), String> {
     );
     let response = post(
         machine,
-        &format!("/machine-enrollment/jobs/{}/finish", job.job.id),
-        serde_json::json!({ "assignmentToken": job.job.assignment_token,
+        &format!("/machine-enrollment/jobs/{}/finish", job.id),
+        serde_json::json!({ "assignmentToken": job.assignment_token,
             "result": if success { "success" } else { "failure" }, "steps": results, "hash": hash }),
     )?;
     if response.status() == reqwest::StatusCode::CONFLICT {
@@ -181,12 +310,27 @@ fn valid_environment(job: &Assignment) -> bool {
         })
 }
 
-fn checkout(job: &Assignment, root: &Path, api_url: &str) -> Result<(), String> {
+fn git_command() -> Command {
+    let mut command = Command::new("git");
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    command
+}
+
+fn checkout(
+    job: &Assignment,
+    root: &Path,
+    api_url: &str,
+    cancelled: &AtomicBool,
+) -> Result<(), String> {
     if !valid_job(job, api_url) {
         return Err("invalid job assignment".into());
     }
     let auth = STANDARD.encode(format!("co:{}", job.assignment_token));
-    let status = Command::new("git")
+    let status = git_command()
         .args(["clone", "--no-checkout", "--", &job.checkout_url, "source"])
         .current_dir(root)
         .env("GIT_TERMINAL_PROMPT", "0")
@@ -199,10 +343,10 @@ fn checkout(job: &Assignment, root: &Path, api_url: &str) -> Result<(), String> 
         .stderr(Stdio::null())
         .spawn()
         .map_err(|error| format!("unable to start checkout: {error}"))?;
-    if !wait_bounded(status, STEP_TIMEOUT)? {
+    if !wait_bounded(status, STEP_TIMEOUT, cancelled)? {
         return Err("unable to fetch the exact commit".into());
     }
-    let status = Command::new("git")
+    let status = git_command()
         .args(["-C", "source", "checkout", "--detach", &job.commit_oid])
         .current_dir(root)
         .env("GIT_CONFIG_NOSYSTEM", "1")
@@ -211,19 +355,29 @@ fn checkout(job: &Assignment, root: &Path, api_url: &str) -> Result<(), String> 
         .stderr(Stdio::null())
         .spawn()
         .map_err(|error| format!("unable to check out commit: {error}"))?;
-    if !wait_bounded(status, STEP_TIMEOUT)? {
+    if !wait_bounded(status, STEP_TIMEOUT, cancelled)? {
         return Err("exact commit is unavailable".into());
     }
     Ok(())
 }
 
-fn wait_bounded(mut child: std::process::Child, timeout: Duration) -> Result<bool, String> {
+fn wait_bounded(
+    mut child: std::process::Child,
+    timeout: Duration,
+    cancelled: &AtomicBool,
+) -> Result<bool, String> {
     let start = Instant::now();
     loop {
         match child.try_wait() {
             Ok(Some(status)) => return Ok(status.success()),
             Err(error) => return Err(format!("process wait failed: {error}")),
-            Ok(None) if start.elapsed() >= timeout => {
+            Ok(None) if start.elapsed() >= timeout || cancelled.load(Ordering::Relaxed) => {
+                #[cfg(unix)]
+                // SAFETY: checkout commands lead their own process group. The
+                // child is still running here, so its PID has not been reused.
+                unsafe {
+                    libc::kill(-(child.id() as i32), libc::SIGKILL);
+                }
                 let _ = child.kill();
                 let _ = child.wait();
                 return Ok(false);
@@ -277,6 +431,8 @@ fn execute_step(
         "--env=PATH=/usr/local/bin:/usr/bin:/bin",
     ]);
     command.arg(format!("--memory={}m", job.ram_mib));
+    command.arg(format!("--label=io.co.codes.machine={}", job.machine_id));
+    command.arg(format!("--memory-swap={}m", job.ram_mib));
     command.arg(format!("--cpus={}", job.vcpus));
     // Load values after entering the container. Inheriting them into Podman
     // itself would let CONTAINERS_CONF/CONTAINER_HOST alter the host launcher.
@@ -374,7 +530,12 @@ fn environment_file(job: &Assignment) -> Result<tempfile::NamedTempFile, ()> {
     Ok(file)
 }
 
-fn execute(machine: &MachineIdentity, job: &Assignment) -> (Vec<StepResult>, bool) {
+fn execute(
+    machine: &MachineIdentity,
+    job: &Assignment,
+    requested_at: Instant,
+    halt: Arc<AtomicBool>,
+) -> (Vec<StepResult>, bool) {
     let logs = Logs::default();
     let upload_stop = Arc::new(AtomicBool::new(false));
     let uploader = live_logs::upload(
@@ -392,17 +553,34 @@ fn execute(machine: &MachineIdentity, job: &Assignment) -> (Vec<StepResult>, boo
     let token = job.assignment_token.clone();
     let stop = Arc::clone(&renew_stop);
     let flag = Arc::clone(&cancelled);
+    let lease_deadline = Arc::new(Mutex::new(requested_at + LEASE_WINDOW));
+    let watched_deadline = lease_deadline.clone();
+    let watch_flag = cancelled.clone();
+    let watch_stop = renew_stop.clone();
+    let watchdog = thread::spawn(move || {
+        while !watch_stop.load(Ordering::Relaxed) {
+            if halt.load(Ordering::Relaxed) || Instant::now() >= *watched_deadline.lock().unwrap() {
+                watch_flag.store(true, Ordering::Relaxed);
+                break;
+            }
+            thread::park_timeout(Duration::from_millis(100));
+        }
+    });
     let renewer = thread::spawn(move || {
         while !stop.load(Ordering::Relaxed) {
             thread::sleep(Duration::from_secs(20));
             if stop.load(Ordering::Relaxed) {
                 break;
             }
+            let renewal_started = Instant::now();
             let response = post(
                 &renew_machine,
                 &format!("/machine-enrollment/jobs/{id}/renew"),
                 serde_json::json!({"assignmentToken": token}),
             );
+            if matches!(response, Ok(ref response) if response.status().is_success()) {
+                *lease_deadline.lock().unwrap() = renewal_started + LEASE_WINDOW;
+            }
             if matches!(response, Ok(ref response) if response.status() == reqwest::StatusCode::CONFLICT || response.status() == reqwest::StatusCode::UNAUTHORIZED)
             {
                 flag.store(true, Ordering::Relaxed);
@@ -413,7 +591,7 @@ fn execute(machine: &MachineIdentity, job: &Assignment) -> (Vec<StepResult>, boo
     let result = (|| {
         let root =
             tempfile::tempdir().map_err(|error| format!("unable to create workspace: {error}"))?;
-        checkout(job, root.path(), &machine.api_url)?;
+        checkout(job, root.path(), &machine.api_url, &cancelled)?;
         let image = std::env::var("CO_MACHINE_IMAGE").unwrap_or_else(|_| IMAGE.to_owned());
         if !image.contains("@sha256:") {
             return Err("CO_MACHINE_IMAGE must be pinned by digest".into());
@@ -444,6 +622,8 @@ fn execute(machine: &MachineIdentity, job: &Assignment) -> (Vec<StepResult>, boo
     uploader.thread().unpark();
     let _ = uploader.join();
     renew_stop.store(true, Ordering::Relaxed);
+    watchdog.thread().unpark();
+    let _ = watchdog.join();
     // The renewal thread is deliberately detached: waiting for its sleep would
     // delay completion. Its stop flag prevents further requests after wake-up.
     drop(renewer);
@@ -470,6 +650,141 @@ mod tests {
     use super::*;
     use std::io::Write;
     use std::net::{TcpListener, TcpStream};
+
+    #[test]
+    fn cpu_shares_bound_the_total_memory_budget() {
+        let shares = [4, 8, 16, 2, 2];
+        let total: u64 = shares
+            .iter()
+            .map(|cpus| u64::from(memory_budget(65536, 32, *cpus)))
+            .sum();
+        assert!(total <= 65536 * 4 / 5);
+        assert_eq!(memory_budget(65536, 32, 4), 6553);
+    }
+
+    #[test]
+    #[ignore = "requires rootless Podman and the pinned Alpine image"]
+    fn shared_runner_executes_isolated_jobs_concurrently() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("source.git");
+        std::fs::create_dir(&source).unwrap();
+        for args in [
+            vec!["init", "--quiet"],
+            vec![
+                "-c",
+                "user.name=CI",
+                "-c",
+                "user.email=ci@example.test",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "--allow-empty",
+                "--quiet",
+                "-m",
+                "Fixture",
+            ],
+        ] {
+            assert!(
+                Command::new("git")
+                    .current_dir(&source)
+                    .args(args)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        }
+        let oid = String::from_utf8(
+            Command::new("git")
+                .current_dir(&source)
+                .args(["rev-parse", "HEAD"])
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap()
+        .trim()
+        .to_owned();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let api_url = format!("http://{}", listener.local_addr().unwrap());
+        let machine_id = format!("cpu-slots-test-{}", std::process::id());
+        let server = thread::spawn(move || {
+            let until = Instant::now() + Duration::from_secs(30);
+            let mut next = 0;
+            let mut finished = 0;
+            while finished < 2 && Instant::now() < until {
+                let (mut stream, _) = match listener.accept() {
+                    Ok(connection) => connection,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(10));
+                        continue;
+                    }
+                    Err(error) => panic!("{error}"),
+                };
+                let (path, body) = read_request(&mut stream);
+                let reply = if path.ends_with("/next-job") {
+                    assert!(
+                        body["capabilities"]
+                            .as_array()
+                            .unwrap()
+                            .contains(&serde_json::json!("cpu-slots-v1"))
+                    );
+                    next += 1;
+                    serde_json::json!({"job": {"id": format!("cpu-slots-{}-{next}", std::process::id()), "assignmentToken": "fixture-token",
+                        "checkoutUrl": format!("file://{}", source.display()), "commitOid": oid,
+                        "steps": [{"name": "Concurrent", "run": "printf '%s' \"$TOKEN\"; sleep 5"}],
+                        "environment": {"TOKEN": format!("isolated-{next}")}, "secretValues": [format!("isolated-{next}")],
+                        "vcpus": 1, "ramMiB": 128 }}).to_string()
+                } else if path.ends_with("/log-deltas") {
+                    assert!(!body.to_string().contains("isolated-"));
+                    serde_json::json!({"type": "ack", "hash": body["update"]["hash"]}).to_string()
+                } else if path.ends_with("/finish") {
+                    assert_eq!(body["result"], "success");
+                    assert_eq!(body["steps"][0]["output"], "***");
+                    finished += 1;
+                    "null".into()
+                } else {
+                    panic!("unexpected request {path}");
+                };
+                write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reply}", reply.len()).unwrap();
+            }
+            assert_eq!(finished, 2);
+        });
+        let machine = MachineIdentity {
+            id: machine_id.clone(),
+            scope: "public".into(),
+            api_url,
+            credential: "co_runner_fixture".into(),
+        };
+        let mut runner = Runner::new().unwrap();
+        assert!(runner.cpus >= 2);
+        runner.poll(&machine).unwrap();
+        runner.poll(&machine).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut overlap = false;
+        while Instant::now() < deadline {
+            let output = Command::new("podman")
+                .args([
+                    "ps",
+                    "--filter",
+                    &format!("label=io.co.codes.machine={machine_id}"),
+                    "--format",
+                    "{{.Names}}",
+                ])
+                .output()
+                .unwrap();
+            if String::from_utf8(output.stdout).unwrap().lines().count() == 2 {
+                overlap = true;
+                break;
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
+        for (_, handle) in runner.active.drain(..) {
+            handle.join().unwrap();
+        }
+        server.join().unwrap();
+        assert!(overlap, "both isolated containers must be running together");
+    }
 
     #[test]
     fn rejects_reserved_environment_names_and_unbounded_values() {
@@ -562,6 +877,7 @@ mod tests {
             ram_mib: 128,
             environment: BTreeMap::new(),
             secret_values: vec![],
+            machine_id: String::new(),
         };
         assert!(valid_job(&job, "https://api.co.codes"));
         assert!(!valid_job(&job, "https://api.codevved.com"));
@@ -582,6 +898,7 @@ mod tests {
             ram_mib: 128,
             environment: BTreeMap::new(),
             secret_values: vec![],
+            machine_id: String::new(),
         };
         assert!(valid_job(&local, "https://api.co.localhost"));
         assert!(!valid_job(&local, "https://api.co.localhost.evil.example"));
@@ -612,6 +929,7 @@ mod tests {
             ram_mib: 128,
             environment: BTreeMap::new(),
             secret_values: vec![],
+            machine_id: String::new(),
         };
         let step = Step { name: "Isolation".into(),
             run: "test -z \"$CO_RUNNER_TEST_SECRET\" && echo result > /workspace/output.txt && cat /workspace/output.txt".into() };
@@ -687,14 +1005,19 @@ mod tests {
             checkout_url: format!("file://{}", source.display()), commit_oid: oid.trim().to_owned(),
             steps: vec![Step { name: "Verify".into(),
                 run: "test \"$(cat payload.txt)\" = 'verified commit' && test -z \"$GIT_CONFIG_VALUE_0\" && echo passed".into() }],
-            vcpus: 1, ram_mib: 128, environment: BTreeMap::new(), secret_values: vec![] };
+            vcpus: 1, ram_mib: 128, environment: BTreeMap::new(), secret_values: vec![], machine_id: String::new() };
         let machine = MachineIdentity {
             id: "test".into(),
             scope: "owner".into(),
             api_url: "http://127.0.0.1:1".into(),
             credential: "unused".into(),
         };
-        let (steps, passed) = execute(&machine, &job);
+        let (steps, passed) = execute(
+            &machine,
+            &job,
+            Instant::now(),
+            Arc::new(AtomicBool::new(false)),
+        );
         assert!(
             passed,
             "{:?}",
@@ -873,7 +1196,11 @@ mod tests {
             api_url,
             credential: "co_runner_test".into(),
         };
-        poll(&machine).unwrap();
+        let mut runner = Runner::new().unwrap();
+        runner.poll(&machine).unwrap();
+        for (_, handle) in runner.active.drain(..) {
+            handle.join().unwrap();
+        }
         server.join().unwrap();
     }
 }
