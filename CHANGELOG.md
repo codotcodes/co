@@ -4,7 +4,12 @@ All notable changes are documented here. This project follows semantic versionin
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-10-17
+
 - Match clone, link and Git credentials to the selected staging environment while preserving repository-scoped agent access.
+- Create and update owner or repository workflow secrets with `co secret set` and fresh owner authentication, including private file and piped input.
+- Pass declared workflow variables and secrets to jobs while masking secret values in their output.
+- Run workflow jobs concurrently within a machine's available CPU capacity, with separate workspaces, logs and cancellation.
 
 ## [0.8.0] - 2026-09-30
 
@@ -61,7 +66,8 @@ All notable changes are documented here. This project follows semantic versionin
 - Validate repository access in `clone` while smart HTTP remains unavailable.
 - Add Linux and macOS release packaging, Nix support, and the global installer.
 
-[Unreleased]: https://github.com/codotcodes/co/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/codotcodes/co/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/codotcodes/co/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/codotcodes/co/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/codotcodes/co/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/codotcodes/co/compare/v0.5.0...v0.6.0
