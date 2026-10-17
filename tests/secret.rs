@@ -22,6 +22,7 @@ fn with_fake_backend_and_stdin(
     config_dir: &std::path::Path,
     command: &[&str],
     stdin_bytes: &[u8],
+    credential: &[u8],
 ) -> (Vec<RecordedRequest>, std::process::Output) {
     // Write a fake session token so the CLI is authenticated.
     fs::write(
@@ -29,6 +30,8 @@ fn with_fake_backend_and_stdin(
         r#"{"session_token":"fictional-session"}"#,
     )
     .unwrap();
+    let credential_file = config_dir.join("reauthentication.txt");
+    fs::write(&credential_file, credential).unwrap();
 
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let api = format!("http://{}", listener.local_addr().unwrap());
@@ -94,6 +97,7 @@ fn with_fake_backend_and_stdin(
     for arg in command {
         cmd.arg(arg);
     }
+    cmd.arg("--reauth-file").arg(credential_file);
     let mut child = cmd.spawn().unwrap();
     {
         let stdin = child.stdin.take().unwrap();
@@ -258,7 +262,8 @@ fn secret_set_creates_secret_through_full_reauth_sequence() {
         ],
         dir.path(),
         &["secret", "set", "DB_PASSWORD", "--owner", "my-org"],
-        b"super-secret-value\nmypassword\n",
+        b"super-secret-value",
+        b"mypassword\n",
     );
 
     assert!(
@@ -330,7 +335,8 @@ fn secret_set_uses_existing_local_version_not_inherited() {
         ],
         dir.path(),
         &["secret", "set", "API_KEY", "--owner", "my-org"],
-        b"key-value\n123456\n",
+        b"key-value",
+        b"123456\n",
     );
 
     assert!(
@@ -378,7 +384,8 @@ fn secret_set_repo_scope() {
         ],
         dir.path(),
         &["secret", "set", "SECRET_NAME", "--repo", "my-org/my-app"],
-        b"value\nmypassword\n",
+        b"value",
+        b"mypassword\n",
     );
 
     assert!(
@@ -486,12 +493,61 @@ fn secret_set_version_conflict_no_retry() {
         ],
         dir.path(),
         &["secret", "set", "TOKEN", "--owner", "my-org"],
-        b"new-value\nmypassword\n",
+        b"new-value",
+        b"mypassword\n",
     );
 
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("version_conflict") || stderr.contains("409"));
+}
+
+#[test]
+fn secret_set_does_not_print_server_reflected_credentials() {
+    for status in [200, 503] {
+        let dir = tempfile::tempdir().unwrap();
+        let (_, output) = with_fake_backend_and_stdin(
+            &[
+                (
+                    "GET".into(),
+                    "/workflow-config/owners/my-org".into(),
+                    200,
+                    empty_owner_list(vec!["password"]),
+                ),
+                (
+                    "POST".into(),
+                    "/workflow-config/owners/my-org/secret/TOKEN/reauthentication".into(),
+                    200,
+                    challenge_response(),
+                ),
+                (
+                    "PUT".into(),
+                    "/workflow-config/owners/my-org/secret/TOKEN".into(),
+                    status,
+                    json!({
+                        "error": "workflow_secret_unavailable",
+                        "message": "fixture-secret-value fixture-password",
+                        "name": "fixture-secret-value", "kind": "secret", "version": 1
+                    }),
+                ),
+            ],
+            dir.path(),
+            &["secret", "set", "TOKEN", "--owner", "my-org"],
+            b"fixture-secret-value",
+            b"fixture-password",
+        );
+        assert!(!output.status.success());
+        let output = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(!output.contains("fixture-secret-value"));
+        assert!(!output.contains("fixture-password"));
+        if status == 503 {
+            assert!(output.contains("workflow_secret_unavailable"));
+        }
+    }
 }
 
 #[test]
@@ -555,7 +611,8 @@ fn secret_set_reauth_method_errors() {
             ],
             dir.path(),
             &["secret", "set", "FOO", "--owner", "my-org"],
-            b"value\nmypassword\n",
+            b"value",
+            b"mypassword\n",
         );
         assert!(!output.status.success(), "{error_code} should fail");
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -589,7 +646,8 @@ fn secret_set_empty_value() {
         ],
         dir.path(),
         &["secret", "set", "EMPTY", "--owner", "my-org"],
-        b"\nmypassword\n",
+        b"",
+        b"mypassword\n",
     );
 
     assert!(
@@ -604,7 +662,7 @@ fn secret_set_empty_value() {
 #[test]
 fn secret_set_multiline_value_from_stdin() {
     let dir = tempfile::tempdir().unwrap();
-    let (_requests, output) = with_fake_backend_and_stdin(
+    let (requests, output) = with_fake_backend_and_stdin(
         &[
             (
                 "GET".to_string(),
@@ -627,7 +685,8 @@ fn secret_set_multiline_value_from_stdin() {
         ],
         dir.path(),
         &["secret", "set", "MULTI", "--owner", "my-org"],
-        b"line1\nline2\nmypassword\n",
+        b"line1\nline2\n",
+        b"mypassword\n",
     );
 
     assert!(
@@ -638,10 +697,10 @@ fn secret_set_multiline_value_from_stdin() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("MULTI"));
 
-    // The value read from stdin is the first line only ("line1"); "line2" is consumed as the credential.
-    let put_body = // not accessible here; behavior verified by success
-        "";
-    let _ = put_body;
+    let put: serde_json::Value =
+        serde_json::from_str(requests[2].body.as_deref().unwrap()).unwrap();
+    assert_eq!(put["value"], "line1\nline2\n");
+    assert_eq!(put["reauthentication"]["password"], "mypassword");
 }
 
 #[test]
@@ -682,6 +741,7 @@ fn secret_set_value_file() {
             "--value-file",
             file_path.to_str().unwrap(),
         ],
+        b"",
         b"mypassword\n",
     );
 

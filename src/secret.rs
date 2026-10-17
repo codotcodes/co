@@ -1,10 +1,10 @@
-use super::{api_url, client, decode, load_config, network_error, repo_spec, session_token};
+use super::{api_url, load_config, network_error, repo_spec, session_token};
+use reqwest::blocking::{Client, Response};
 use serde::Deserialize;
-use std::io::{self, BufRead, IsTerminal, Read};
+use std::io::{self, IsTerminal, Read};
 use std::path::PathBuf;
 
-const SECRET_SET_USAGE: &str =
-    "usage: co secret set <NAME> --owner <OWNER> | --repo <OWNER/REPO> [--value-file <PATH>]";
+const SECRET_SET_USAGE: &str = "usage: co secret set <NAME> --owner <OWNER> | --repo <OWNER/REPO> [--value-file <PATH>] [--reauth-file <PATH>]";
 
 /// Workflow secret values are limited to 16 KiB of UTF-8 (no NUL).
 const MAX_VALUE_BYTES: usize = 16_384;
@@ -12,35 +12,26 @@ const MAX_VALUE_BYTES: usize = 16_384;
 /// Workflow secret names: `^[A-Z_][A-Z0-9_]{0,99}$`.
 const SECRET_NAME_MAX: usize = 100;
 
-#[derive(Debug, Deserialize)]
-#[allow(dead_code)]
+#[derive(Deserialize)]
 struct WorkflowConfigurationEntry {
     kind: String,
     name: String,
-    scope: String,
     version: u64,
-    #[serde(default)]
-    value: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
-#[allow(dead_code)]
+#[derive(Deserialize)]
 struct WorkflowConfigurationList {
     entries: Vec<WorkflowConfigurationEntry>,
-    inherited: Vec<WorkflowConfigurationEntry>,
-    effective: Vec<WorkflowConfigurationEntry>,
     #[serde(rename = "canManageSecrets")]
     can_manage_secrets: bool,
     #[serde(rename = "reauthenticationMethods")]
     reauthentication_methods: Vec<String>,
 }
 
-#[derive(Debug, Deserialize)]
-#[allow(dead_code)]
+#[derive(Deserialize)]
 struct ReauthenticationResult {
     #[serde(rename = "challengeId")]
     challenge_id: String,
-    method: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -73,6 +64,7 @@ pub(super) fn run(args: &[String]) -> Result<(), String> {
     let mut owner: Option<String> = None;
     let mut repo: Option<String> = None;
     let mut value_file: Option<PathBuf> = None;
+    let mut reauth_file: Option<PathBuf> = None;
     let mut index = 0;
     while index < rest.len() {
         match rest[index].as_str() {
@@ -103,6 +95,14 @@ pub(super) fn run(args: &[String]) -> Result<(), String> {
                         .into(),
                 );
             }
+            "--reauth-file" => {
+                index += 1;
+                reauth_file = Some(
+                    rest.get(index)
+                        .ok_or("--reauth-file requires a path")?
+                        .into(),
+                );
+            }
             option if option.starts_with('-') => {
                 return Err(format!(
                     "unknown secret option {option:?}\n{SECRET_SET_USAGE}"
@@ -127,9 +127,18 @@ pub(super) fn run(args: &[String]) -> Result<(), String> {
         _ => {}
     }
 
+    if let Some(owner) = &owner {
+        repo_spec(&format!("{owner}/scope"))?;
+    }
     let config = load_config()?;
     let token = session_token(&config)?;
     let api = api_url(&config);
+    let client = Client::builder()
+        .user_agent(concat!("co/", env!("CARGO_PKG_VERSION")))
+        .timeout(std::time::Duration::from_secs(30))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|_| "unable to initialize secret API client")?;
 
     let (base, scope_label) = match (&owner, &repo) {
         (Some(o), None) => (
@@ -146,10 +155,8 @@ pub(super) fn run(args: &[String]) -> Result<(), String> {
         _ => unreachable!("scope validated above"),
     };
 
-    // Step 1: read the local configuration to determine the entry version and
-    // whether the caller can manage secrets in this scope.
     let list: WorkflowConfigurationList = decode(
-        client()?
+        client
             .get(&base)
             .bearer_auth(token)
             .send()
@@ -169,13 +176,14 @@ pub(super) fn run(args: &[String]) -> Result<(), String> {
         .map(|entry| entry.version)
         .unwrap_or(0);
 
-    // Step 2: pick a terminal-supported reauthentication method.
     let methods = &list.reauthentication_methods;
     let method = select_reauth_method(methods)?;
 
-    // Step 3: issue the fresh, action-bound reauthentication challenge.
+    let value = read_secret_value(value_file.as_deref())?;
+    validate_secret_value(&value)?;
+
     let challenge: ReauthenticationResult = decode(
-        client()?
+        client
             .post(format!("{base}/secret/{name}/reauthentication"))
             .bearer_auth(token)
             .json(&serde_json::json!({
@@ -187,14 +195,8 @@ pub(super) fn run(args: &[String]) -> Result<(), String> {
             .map_err(network_error)?,
     )?;
 
-    // Step 4: read the secret value (prompt / stdin / file).
-    let value = read_secret_value(value_file.as_deref())?;
-    validate_secret_value(&value)?;
+    let proof = prompt_reauth_proof(&method, reauth_file.as_deref())?;
 
-    // Step 5: collect the reauthentication proof for the chosen method.
-    let proof = prompt_reauth_proof(&method)?;
-
-    // Step 6: write the secret, bound to the local version and challenge.
     let mut reauthentication = serde_json::json!({ "challengeId": challenge.challenge_id });
     if let Some(proof_obj) = proof.as_object() {
         if let Some(auth_obj) = reauthentication.as_object_mut() {
@@ -204,7 +206,7 @@ pub(super) fn run(args: &[String]) -> Result<(), String> {
         }
     }
     let result: SecretWriteResult = decode(
-        client()?
+        client
             .put(format!("{base}/secret/{name}"))
             .bearer_auth(token)
             .json(&serde_json::json!({
@@ -216,8 +218,11 @@ pub(super) fn run(args: &[String]) -> Result<(), String> {
             .map_err(network_error)?,
     )?;
 
-    println!("{}", result.name);
-    println!("  kind    {}", result.kind);
+    if result.name != name || result.kind != "secret" || result.version != local_version + 1 {
+        return Err("invalid secret API response".into());
+    }
+    println!("{name}");
+    println!("  kind    secret");
     println!("  version {}", result.version);
     Ok(())
 }
@@ -234,6 +239,9 @@ fn print_secret_help() {
     println!("  --owner <OWNER>        personal or organization owner scope");
     println!("  --repo <OWNER/REPO>    repository scope");
     println!("  --value-file <PATH>    read the secret value from this file");
+    println!("  --reauth-file <PATH>   read password or TOTP from a separate private file");
+    println!("Stdin and value files are read in full, preserving every byte, including newlines.");
+    println!("Authentication is prompted on the terminal unless --reauth-file is given.");
     println!();
     println!("Examples:");
     println!("  co secret set DATABASE_URL --owner my-org");
@@ -297,23 +305,54 @@ fn select_reauth_method(methods: &[String]) -> Result<String, String> {
     )
 }
 
-/// Read the secret value from a file, stdin, or an echo-disabled prompt.
-///
-/// Stdin semantics (when not a terminal and --value-file is not given): read one
-/// line from stdin, then strip exactly one trailing newline (handling CRLF).
-/// All other bytes — including leading, interior, and intentional whitespace —
-/// are preserved. Empty input (a lone newline or immediate EOF) yields an empty
-/// string. This leaves the remainder of stdin available for the reauthentication
-/// credential that follows. A file is read in full, byte for byte, with no
-/// stripping.
+// Never print untrusted API messages: a proxy or server may echo request secrets.
+fn decode<T: for<'de> Deserialize<'de>>(response: Response) -> Result<T, String> {
+    let status = response.status();
+    if status.is_success() {
+        return response
+            .json()
+            .map_err(|_| "invalid secret API response".into());
+    }
+    let body = response.json::<serde_json::Value>().unwrap_or_default();
+    let code = body
+        .get("error")
+        .and_then(|value| value.as_str())
+        .filter(|code| {
+            matches!(
+                *code,
+                "unauthorized"
+                    | "forbidden"
+                    | "not_found"
+                    | "version_conflict"
+                    | "invalid_configuration"
+                    | "configuration_limit"
+                    | "invalid_reauthentication"
+                    | "reauthentication_expired"
+                    | "reauthentication_rate_limited"
+                    | "reauthentication_method_unavailable"
+                    | "workflow_secret_unavailable"
+            )
+        })
+        .unwrap_or("request_failed");
+    Err(format!("secret request failed: {code} (HTTP {status})"))
+}
+
+fn read_bounded(reader: impl Read, limit: usize) -> Result<String, String> {
+    let mut value = String::new();
+    reader
+        .take((limit + 1) as u64)
+        .read_to_string(&mut value)
+        .map_err(|_| "unable to read UTF-8 secret input")?;
+    if value.len() > limit {
+        return Err(format!("secret input exceeds {limit} UTF-8 bytes"));
+    }
+    Ok(value)
+}
+
 fn read_secret_value(value_file: Option<&std::path::Path>) -> Result<String, String> {
     if let Some(path) = value_file {
-        let mut content = String::new();
-        std::fs::File::open(path)
-            .map_err(|error| format!("unable to read secret file {}: {error}", path.display()))?
-            .read_to_string(&mut content)
-            .map_err(|error| format!("unable to read secret file {}: {error}", path.display()))?;
-        return Ok(content);
+        let file = std::fs::File::open(path).map_err(|_| "unable to open secret value file")?;
+        return read_bounded(file, MAX_VALUE_BYTES);
     }
 
     if io::stdin().is_terminal() {
@@ -321,51 +360,38 @@ fn read_secret_value(value_file: Option<&std::path::Path>) -> Result<String, Str
             .map_err(|error| format!("unable to read secret value: {error}"));
     }
 
-    let mut line = String::new();
-    io::stdin()
-        .lock()
-        .read_line(&mut line)
-        .map_err(|error| format!("unable to read secret value from stdin: {error}"))?;
-    // Strip exactly one trailing newline, preserving every other byte.
-    if line.ends_with('\n') {
-        line.pop();
-        if line.ends_with('\r') {
-            line.pop();
-        }
-    }
-    Ok(line)
+    read_bounded(io::stdin().lock(), MAX_VALUE_BYTES)
 }
 
-/// Read one line from stdin (or an echo-disabled prompt on a terminal) for the
-/// reauthentication credential.
-fn read_reauth_credential(prompt: &str) -> Result<String, String> {
-    if io::stdin().is_terminal() {
-        return rpassword::prompt_password(prompt)
-            .map_err(|error| format!("unable to read credential: {error}"));
-    }
-    let mut line = String::new();
-    io::stdin()
-        .lock()
-        .read_line(&mut line)
-        .map_err(|error| format!("unable to read credential from stdin: {error}"))?;
-    if line.ends_with('\n') {
-        line.pop();
-        if line.ends_with('\r') {
-            line.pop();
+fn read_reauth_credential(prompt: &str, path: Option<&std::path::Path>) -> Result<String, String> {
+    if let Some(path) = path {
+        let file = std::fs::File::open(path).map_err(|_| "unable to open reauthentication file")?;
+        let mut value = read_bounded(file, 4096)?;
+        if value.ends_with('\n') {
+            value.pop();
+            if value.ends_with('\r') {
+                value.pop();
+            }
         }
+        return Ok(value);
     }
-    Ok(line)
+    // rpassword opens the controlling terminal, never the secret-value pipe.
+    rpassword::prompt_password(prompt)
+        .map_err(|_| "unable to read authentication from the terminal; use --reauth-file for noninteractive input".into())
 }
 
 /// Prompt for the reauthentication proof matching the chosen method.
-fn prompt_reauth_proof(method: &str) -> Result<serde_json::Value, String> {
+fn prompt_reauth_proof(
+    method: &str,
+    path: Option<&std::path::Path>,
+) -> Result<serde_json::Value, String> {
     match method {
         "password" => {
-            let password = read_reauth_credential("Enter your account password: ")?;
+            let password = read_reauth_credential("Enter your account password: ", path)?;
             Ok(serde_json::json!({ "password": password }))
         }
         "totp" => {
-            let code = read_reauth_credential("Enter your 6-digit authentication code: ")?;
+            let code = read_reauth_credential("Enter your 6-digit authentication code: ", path)?;
             Ok(serde_json::json!({ "code": code }))
         }
         _ => Err(format!("unsupported reauthentication method {method:?}")),
@@ -398,6 +424,17 @@ mod tests {
         assert!(validate_secret_value(&"a".repeat(MAX_VALUE_BYTES)).is_ok());
         assert!(validate_secret_value(&"a".repeat(MAX_VALUE_BYTES + 1)).is_err());
         assert!(validate_secret_value("a\0b").is_err());
+    }
+
+    #[test]
+    fn bounds_secret_input_without_changing_whitespace() {
+        assert_eq!(
+            read_bounded(&b"line one\nline two\n"[..], MAX_VALUE_BYTES).unwrap(),
+            "line one\nline two\n"
+        );
+        assert_eq!(read_bounded(&b""[..], MAX_VALUE_BYTES).unwrap(), "");
+        assert!(read_bounded(&vec![b'x'; MAX_VALUE_BYTES + 1][..], MAX_VALUE_BYTES).is_err());
+        assert!(read_bounded(&[0xff][..], MAX_VALUE_BYTES).is_err());
     }
 
     #[test]

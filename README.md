@@ -36,6 +36,8 @@ co machine enroll --owner OWNER --label LABEL
 co machine list
 co machine run MACHINE_ID
 co workflow check [FILE]
+co secret set NAME --owner OWNER
+co secret set NAME --repo OWNER/REPO
 co doctor
 co logout
 ```
@@ -49,6 +51,19 @@ co logout
 Enrollment saves a separate machine credential in the owner-only CLI config for the exact API used at enrollment. `co machine list` shows enrolled machine IDs without credentials. Start `co machine run MACHINE_ID` in the foreground; it sends a heartbeat and polls for assigned jobs every 30 seconds. A registered machine is shown as offline after 90 seconds without a heartbeat. Keep the same `CO_API_URL` when using a non-production API. Rootless Podman and a locally available image are required for execution. The default pinned Alpine image supports shell steps; set `CO_MACHINE_IMAGE` to another already provisioned image pinned by `@sha256:` for builds needing other tools. Checkout uses a short-lived pull-only token outside the container. Steps have no network or host credentials, a 10-minute per-step and 30-minute total limit. Changed output suffixes are uploaded about every 500 ms while commands run, with at most 16 KiB per step and 128 KiB per job, including visible truncation notices. Each batch carries UTF-8 byte offsets and a cumulative SHA-256 digest. The server acknowledges only persisted, verified content; missing or mismatched logs trigger a full snapshot repair. Temporary log-upload failures retry without stopping execution; final output and its digest are sent with the result. A disconnected or cancelled run cannot report success after its lease expires.
 
 `co workflow check` validates `.co/workflows/*.ts` in the current repository, or a single direct file with `co workflow check .co/workflows/verify.ts`. Install `@cocodes/workflows` into the repository first and run the command at the repository root. The checker requires Bun, parses TypeScript without evaluating repository code or contacting the API, and reports file/line diagnostics. Dynamic job generation is unsupported in v1.
+
+### Workflow secrets
+
+`co secret set NAME --owner OWNER` creates or replaces a secret inherited by all of that owner's repositories. Use `--repo OWNER/REPO` for a repository-only value that overrides the inherited secret. Both commands require the actual personal owner or an organization owner, a human `co login` session, and fresh password or authenticator reauthentication. Passkey-only accounts must use the web settings page or enroll an authenticator. Agent grants do not authorize secret management.
+
+The CLI prompts without echoing the value or credential. Piped input and `--value-file PATH` preserve the entire UTF-8 value, including newlines; an empty value is valid. Reauthentication uses a separate terminal prompt, never a line from the secret input. For noninteractive use, `--reauth-file PATH` reads the password or authenticator code from a separate private file, removing one final line ending. Keep both files private and never put secret values or passwords in command arguments.
+
+```sh
+co secret set DEPLOY_TOKEN --repo my-org/my-app
+co secret set SIGNING_KEY --owner my-org --value-file ./private-key.txt
+```
+
+Names use uppercase letters, digits and underscores, start with a letter or underscore, and contain at most 100 characters. Values contain at most 16 KiB and no NUL bytes. Concurrent changes fail without retrying or overwriting the newer version. Successful output contains only the name, kind and version; values and credentials are not printed. Use the same `CO_API_URL` and `CO_CONFIG_DIR` as the corresponding login session when targeting staging.
 
 `co repo create NAME` creates an empty private repository in your personal namespace. Use `OWNER/NAME` for an explicit namespace you can write to, and `--public` to make the repository public. Creation is non-interactive and uses the existing `co login` machine session, so a coding agent can run it on your behalf with that session's permissions. Repository-scoped agent grants do not authorize repository creation.
 
