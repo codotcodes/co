@@ -97,12 +97,104 @@ pub(super) fn append(logs: &Logs, index: usize, text: &str) {
     }
 }
 
+#[cfg(test)]
 pub(super) fn drain<R: Read + Send + 'static>(
-    mut stream: R,
+    stream: R,
     logs: Logs,
     index: usize,
 ) -> thread::JoinHandle<()> {
+    drain_masked(stream, logs, index, vec![])
+}
+
+struct SecretMasker {
+    patterns: Vec<String>,
+    pending: String,
+}
+
+impl SecretMasker {
+    fn new(secrets: Vec<String>) -> Self {
+        let mut patterns = Vec::new();
+        for secret in secrets {
+            for part in std::iter::once(secret.as_str()).chain(secret.lines()) {
+                let normalized: String = part
+                    .chars()
+                    .filter(|c| !c.is_control() || matches!(c, '\n' | '\t'))
+                    .collect();
+                if !normalized.is_empty() && !patterns.contains(&normalized) {
+                    patterns.push(normalized);
+                }
+            }
+        }
+        Self {
+            patterns,
+            pending: String::new(),
+        }
+    }
+
+    fn feed(&mut self, text: &str, finish: bool) -> String {
+        self.pending.extend(
+            text.chars()
+                .filter(|c| !c.is_control() || matches!(c, '\n' | '\t')),
+        );
+        // Retain only a suffix that could become a secret, not an arbitrary
+        // fixed-size tail: ordinary short log lines still stream immediately.
+        let retain = if finish {
+            0
+        } else {
+            self.patterns
+                .iter()
+                .map(|pattern| {
+                    let limit = self.pending.len().min(pattern.len().saturating_sub(1));
+                    (1..=limit)
+                        .rev()
+                        .find(|length| {
+                            let start = self.pending.len() - length;
+                            self.pending.is_char_boundary(start)
+                                && pattern.starts_with(&self.pending[start..])
+                        })
+                        .unwrap_or(0)
+                })
+                .max()
+                .unwrap_or(0)
+        };
+        let mut end = self.pending.len() - retain;
+        while !self.pending.is_char_boundary(end) {
+            end -= 1;
+        }
+        let mut cursor = 0;
+        let mut output = String::new();
+        while cursor < end {
+            let next = self
+                .patterns
+                .iter()
+                .filter_map(|pattern| {
+                    self.pending[cursor..]
+                        .find(pattern)
+                        .map(|offset| (cursor + offset, pattern.len()))
+                })
+                .min_by_key(|(start, length)| (*start, std::cmp::Reverse(*length)));
+            if let Some((start, length)) = next.filter(|(start, _)| *start < end) {
+                output.push_str(&self.pending[cursor..start]);
+                output.push_str("***");
+                cursor = start + length;
+            } else {
+                output.push_str(&self.pending[cursor..end]);
+                cursor = end;
+            }
+        }
+        self.pending.drain(..cursor);
+        output
+    }
+}
+
+pub(super) fn drain_masked<R: Read + Send + 'static>(
+    mut stream: R,
+    logs: Logs,
+    index: usize,
+    secrets: Vec<String>,
+) -> thread::JoinHandle<()> {
     thread::spawn(move || {
+        let mut masker = SecretMasker::new(secrets);
         let mut pending = Vec::new();
         let mut buffer = [0u8; 8192];
         while let Ok(count) = stream.read(&mut buffer) {
@@ -115,7 +207,7 @@ pub(super) fn drain<R: Read + Send + 'static>(
             while consumed < pending.len() {
                 match std::str::from_utf8(&pending[consumed..]) {
                     Ok(text) => {
-                        append(&logs, index, text);
+                        append(&logs, index, &masker.feed(text, false));
                         consumed = pending.len();
                     }
                     Err(error) => {
@@ -123,11 +215,12 @@ pub(super) fn drain<R: Read + Send + 'static>(
                         append(
                             &logs,
                             index,
-                            std::str::from_utf8(&pending[consumed..end]).unwrap(),
+                            &masker
+                                .feed(std::str::from_utf8(&pending[consumed..end]).unwrap(), false),
                         );
                         consumed = end;
                         if let Some(length) = error.error_len() {
-                            append(&logs, index, "�");
+                            append(&logs, index, &masker.feed("�", false));
                             consumed += length;
                         } else {
                             break;
@@ -138,8 +231,13 @@ pub(super) fn drain<R: Read + Send + 'static>(
             pending.drain(..consumed);
         }
         if !pending.is_empty() {
-            append(&logs, index, &String::from_utf8_lossy(&pending));
+            append(
+                &logs,
+                index,
+                &masker.feed(&String::from_utf8_lossy(&pending), false),
+            );
         }
+        append(&logs, index, &masker.feed("", true));
     })
 }
 
@@ -208,6 +306,31 @@ pub(super) fn upload(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn secrets_are_masked_across_every_chunk_boundary_and_control_filtering() {
+        for split in 0..=20 {
+            let input = "before secret after!";
+            let split = split.min(input.len());
+            let mut masker = SecretMasker::new(vec!["secret".into()]);
+            let mut result = masker.feed(&input[..split], false);
+            assert!(!result.contains("secret"));
+            result.push_str(&masker.feed(&input[split..], false));
+            result.push_str(&masker.feed("", true));
+            assert_eq!(result, "before *** after!");
+        }
+        let mut masker = SecretMasker::new(vec!["secret".into(), "first\nsecond".into()]);
+        let mut result = masker.feed("sec\0ret first\nsecond first second", false);
+        result.push_str(&masker.feed("", true));
+        assert_eq!(result, "*** *** *** ***");
+    }
+
+    #[test]
+    fn masking_handles_unicode_and_longest_overlapping_secret() {
+        let mut masker = SecretMasker::new(vec!["🦀token".into(), "🦀".into()]);
+        let mut result = masker.feed("🦀tok", false);
+        result.push_str(&masker.feed("en!", true));
+        assert_eq!(result, "***!");
+    }
     #[test]
     fn hashes_canonical_tuples_and_sends_only_utf8_suffix() {
         assert_eq!(

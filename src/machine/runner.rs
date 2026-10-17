@@ -3,8 +3,10 @@ use super::live_logs::{self, Logs};
 use crate::{client, decode, network_error};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 #[cfg(test)]
 use std::io::Read;
+use std::io::Write;
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::{
@@ -28,6 +30,10 @@ struct Assignment {
     vcpus: u32,
     #[serde(rename = "ramMiB")]
     ram_mib: u32,
+    #[serde(default)]
+    environment: BTreeMap<String, String>,
+    #[serde(default)]
+    secret_values: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -66,7 +72,7 @@ pub(super) fn poll(machine: &MachineIdentity) -> Result<(), String> {
     let response = post(
         machine,
         "/machine-enrollment/next-job",
-        serde_json::json!({}),
+        serde_json::json!({"capabilities": ["workflow-environment-v1"]}),
     )?;
     if response.status() == reqwest::StatusCode::NO_CONTENT {
         return Ok(());
@@ -137,6 +143,42 @@ fn valid_job(job: &Assignment, api_url: &str) -> bool {
         && job.ram_mib > 0
         && !job.assignment_token.is_empty()
         && job.steps.len() <= 20
+        && valid_environment(job)
+}
+
+fn valid_environment(job: &Assignment) -> bool {
+    job.environment.len() <= 100
+        && job.environment.values().map(String::len).sum::<usize>() <= 65_536
+        && job.environment.iter().all(|(name, value)| {
+            !name.is_empty()
+                && name.len() <= 100
+                && name.bytes().enumerate().all(|(i, c)| {
+                    c == b'_' || c.is_ascii_alphabetic() || i > 0 && c.is_ascii_digit()
+                })
+                && ![
+                    "HOME",
+                    "PATH",
+                    "ENV",
+                    "BASH_ENV",
+                    "IFS",
+                    "CDPATH",
+                    "SHELLOPTS",
+                    "BASHOPTS",
+                    "__proto__",
+                    "constructor",
+                    "prototype",
+                ]
+                .contains(&name.as_str())
+                && !["CO_", "LD_", "DYLD_"]
+                    .iter()
+                    .any(|prefix| name.starts_with(prefix))
+                && value.len() <= 16_384
+                && !value.contains('\0')
+        })
+        && job.secret_values.len() <= 100
+        && job.secret_values.iter().all(|secret| {
+            !secret.is_empty() && job.environment.values().any(|value| value == secret)
+        })
 }
 
 fn checkout(job: &Assignment, root: &Path, api_url: &str) -> Result<(), String> {
@@ -202,6 +244,19 @@ fn execute_step(
 ) -> StepResult {
     let index = logs.lock().unwrap().len();
     live_logs::begin(logs, &step.name);
+    let environment = match environment_file(job) {
+        Ok(file) => file,
+        Err(()) => {
+            let message = "Unable to prepare the workflow environment.";
+            live_logs::append(logs, index, message);
+            logs.lock().unwrap()[index].exit_code = Some(1);
+            return StepResult {
+                name: step.name.clone(),
+                exit_code: 1,
+                output: message.into(),
+            };
+        }
+    };
     let container = format!("co-{}-{index}", job.id);
     let mut command = Command::new("podman");
     command.args([
@@ -223,12 +278,26 @@ fn execute_step(
     ]);
     command.arg(format!("--memory={}m", job.ram_mib));
     command.arg(format!("--cpus={}", job.vcpus));
+    // Load values after entering the container. Inheriting them into Podman
+    // itself would let CONTAINERS_CONF/CONTAINER_HOST alter the host launcher.
+    command.arg(format!(
+        "--volume={}:/run/co-environment.sh:ro,Z",
+        environment.path().display()
+    ));
     command.arg(format!(
         "--volume={}:{}:rw,Z",
         directory.display(),
         "/workspace"
     ));
-    command.args([image, "sh", "-e", "-c", &step.run]);
+    command.args([
+        image,
+        "/bin/sh",
+        "-e",
+        "-c",
+        ". /run/co-environment.sh\nexec /bin/sh -e -c \"$1\"",
+        "co-step",
+        &step.run,
+    ]);
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = match command.spawn() {
         Ok(child) => child,
@@ -243,15 +312,17 @@ fn execute_step(
             };
         }
     };
-    let stdout = live_logs::drain(
+    let stdout = live_logs::drain_masked(
         child.stdout.take().expect("piped stdout"),
         logs.clone(),
         index,
+        job.secret_values.clone(),
     );
-    let stderr = live_logs::drain(
+    let stderr = live_logs::drain_masked(
         child.stderr.take().expect("piped stderr"),
         logs.clone(),
         index,
+        job.secret_values.clone(),
     );
     let start = Instant::now();
     let exit_code = loop {
@@ -287,6 +358,20 @@ fn execute_step(
         exit_code,
         output,
     }
+}
+
+fn environment_file(job: &Assignment) -> Result<tempfile::NamedTempFile, ()> {
+    if !valid_environment(job) {
+        return Err(());
+    }
+    // NamedTempFile is owner-only and unlinks on drop, including failed steps.
+    let mut file = tempfile::NamedTempFile::new().map_err(|_| ())?;
+    for (name, value) in &job.environment {
+        let quoted = value.replace('\'', "'\\''");
+        writeln!(file, "export {name}='{quoted}'").map_err(|_| ())?;
+    }
+    file.flush().map_err(|_| ())?;
+    Ok(file)
 }
 
 fn execute(machine: &MachineIdentity, job: &Assignment) -> (Vec<StepResult>, bool) {
@@ -387,6 +472,85 @@ mod tests {
     use std::net::{TcpListener, TcpStream};
 
     #[test]
+    fn rejects_reserved_environment_names_and_unbounded_values() {
+        let mut job: Assignment = serde_json::from_value(serde_json::json!({
+            "id": "test", "assignmentToken": "token", "checkoutUrl": "https://git.co.codes/a/b.git",
+            "commitOid": "a".repeat(40), "steps": [], "vcpus": 1, "ramMiB": 128,
+            "environment": { "TOKEN": "secret" }, "secretValues": ["secret"]
+        }))
+        .unwrap();
+        assert!(valid_environment(&job));
+        for name in [
+            "PATH",
+            "HOME",
+            "BASH_ENV",
+            "CO_TOKEN",
+            "LD_PRELOAD",
+            "BAD-NAME",
+        ] {
+            job.environment.insert(name.into(), "x".into());
+            assert!(!valid_environment(&job));
+            job.environment.remove(name);
+        }
+        job.environment.insert("TOKEN".into(), "x".repeat(16_385));
+        assert!(!valid_environment(&job));
+    }
+
+    #[test]
+    fn environment_script_quotes_values_and_is_ephemeral() {
+        let job: Assignment = serde_json::from_value(serde_json::json!({
+            "id": "test", "assignmentToken": "token", "checkoutUrl": "https://git.co.codes/a/b.git",
+            "commitOid": "a".repeat(40), "steps": [], "vcpus": 1, "ramMiB": 128,
+            "environment": {"TOKEN": "literal'$(touch /tmp/co-script-injection)\nnext"},
+            "secretValues": []
+        }))
+        .unwrap();
+        let file = environment_file(&job).unwrap();
+        let path = file.path().to_path_buf();
+        let source = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            source,
+            "export TOKEN='literal'\\''$(touch /tmp/co-script-injection)\nnext'\n"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+        drop(file);
+        assert!(!path.exists());
+    }
+
+    #[test]
+    #[ignore = "requires rootless Podman and the pinned Alpine image"]
+    fn declared_environment_is_injected_and_redacted_before_upload() {
+        let root = tempfile::tempdir().unwrap();
+        let job: Assignment = serde_json::from_value(serde_json::json!({
+            "id": "00000000-0000-4000-8000-000000000099", "assignmentToken": "checkout-only",
+            "checkoutUrl": "https://git.co.codes/a/b.git", "commitOid": "a".repeat(40), "steps": [], "vcpus": 1, "ramMiB": 128,
+            "environment": { "TOKEN": "fixture-sensitive", "REGION": "canada", "MULTILINE": "line one\nline two", "CONTAINERS_CONF": "/co-test-must-not-affect-host" },
+            "secretValues": ["fixture-sensitive"]
+        })).unwrap();
+        let step = Step { name: "Environment".into(), run: "test \"$REGION\" = canada; test \"$CONTAINERS_CONF\" = /co-test-must-not-affect-host; test \"$MULTILINE\" = \"$(printf 'line one\\nline two')\"; printf '%s' \"$TOKEN\"".into() };
+        let logs = Logs::default();
+        let result = execute_step(
+            IMAGE,
+            root.path(),
+            &step,
+            &job,
+            &AtomicBool::new(false),
+            Instant::now() + STEP_TIMEOUT,
+            &logs,
+        );
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(result.output, "***");
+        assert_eq!(logs.lock().unwrap()[0].output, "***");
+    }
+
+    #[test]
     fn checkout_origin_is_bound_to_the_api_environment() {
         let job = Assignment {
             id: "test".into(),
@@ -396,6 +560,8 @@ mod tests {
             steps: vec![],
             vcpus: 1,
             ram_mib: 128,
+            environment: BTreeMap::new(),
+            secret_values: vec![],
         };
         assert!(valid_job(&job, "https://api.co.codes"));
         assert!(!valid_job(&job, "https://api.codevved.com"));
@@ -414,6 +580,8 @@ mod tests {
             steps: vec![],
             vcpus: 1,
             ram_mib: 128,
+            environment: BTreeMap::new(),
+            secret_values: vec![],
         };
         assert!(valid_job(&local, "https://api.co.localhost"));
         assert!(!valid_job(&local, "https://api.co.localhost.evil.example"));
@@ -442,6 +610,8 @@ mod tests {
             steps: vec![],
             vcpus: 1,
             ram_mib: 128,
+            environment: BTreeMap::new(),
+            secret_values: vec![],
         };
         let step = Step { name: "Isolation".into(),
             run: "test -z \"$CO_RUNNER_TEST_SECRET\" && echo result > /workspace/output.txt && cat /workspace/output.txt".into() };
@@ -517,7 +687,7 @@ mod tests {
             checkout_url: format!("file://{}", source.display()), commit_oid: oid.trim().to_owned(),
             steps: vec![Step { name: "Verify".into(),
                 run: "test \"$(cat payload.txt)\" = 'verified commit' && test -z \"$GIT_CONFIG_VALUE_0\" && echo passed".into() }],
-            vcpus: 1, ram_mib: 128 };
+            vcpus: 1, ram_mib: 128, environment: BTreeMap::new(), secret_values: vec![] };
         let machine = MachineIdentity {
             id: "test".into(),
             scope: "owner".into(),
@@ -630,11 +800,13 @@ mod tests {
         let api_url = format!("http://{}", listener.local_addr().unwrap());
         let server = thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
-            let (path, _) = read_request(&mut stream);
+            let (path, request) = read_request(&mut stream);
             assert_eq!(path, "/machine-enrollment/next-job");
+            assert_eq!(request["capabilities"][0], "workflow-environment-v1");
             let body = serde_json::json!({"job": {"id": "00000000-0000-4000-8000-000000000003",
                 "assignmentToken": "test-token", "checkoutUrl": format!("file://{}", source.display()),
-                "commitOid": oid, "steps": [{"name": "Read", "run": "cat payload.txt; sleep 5; printf 'done\\n'"}],
+                "commitOid": oid, "steps": [{"name": "Read", "run": "cat payload.txt; sleep 5; printf '%s\\n' \"$TOKEN\""}],
+                "environment": {"TOKEN": "fixture-secret-token"}, "secretValues": ["fixture-secret-token"],
                 "vcpus": 1, "ramMiB": 128 }}).to_string();
             write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
             drop(stream);
@@ -645,6 +817,7 @@ mod tests {
             loop {
                 let (mut stream, _) = listener.accept().unwrap();
                 let (path, body) = read_request(&mut stream);
+                assert!(!body.to_string().contains("fixture-secret-token"));
                 if path.ends_with("/log-deltas") {
                     assert_eq!(body["assignmentToken"], "test-token");
                     if body["update"]["steps"][0]["output"] == "from exact commit\n" {
@@ -679,11 +852,11 @@ mod tests {
                         "Output must arrive while the step is still running"
                     );
                     assert_eq!(body["result"], "success", "{body}");
-                    assert_eq!(body["steps"][0]["output"], "from exact commit\ndone\n");
+                    assert_eq!(body["steps"][0]["output"], "from exact commit\n***\n");
                     assert!(repaired);
                     assert_eq!(
                         body["hash"],
-                        live_logs::digest(vec![("Read", 0, "from exact commit\ndone\n")])
+                        live_logs::digest(vec![("Read", 0, "from exact commit\n***\n")])
                     );
                     write!(
                         stream,
