@@ -123,11 +123,11 @@ impl Runner {
 }
 
 fn host_memory_budget() -> Result<u64, String> {
-    let mut memory = super::ram_mib()?;
+    let memory = super::ram_mib()?;
     #[cfg(target_os = "linux")]
     if let Ok(limit) = std::fs::read_to_string("/sys/fs/cgroup/memory.max") {
         if let Ok(bytes) = limit.trim().parse::<u64>() {
-            memory = memory.min(bytes / (1024 * 1024));
+            return Ok(memory.min(bytes / (1024 * 1024)));
         }
     }
     Ok(memory)
@@ -311,12 +311,14 @@ fn valid_environment(job: &Assignment) -> bool {
 }
 
 fn git_command() -> Command {
-    let mut command = Command::new("git");
+    let command = Command::new("git");
     #[cfg(unix)]
-    {
+    let command = {
         use std::os::unix::process::CommandExt;
+        let mut command = command;
         command.process_group(0);
-    }
+        command
+    };
     command
 }
 
