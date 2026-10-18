@@ -258,34 +258,51 @@ fn heartbeat(id: &str) -> Result<(), HeartbeatError> {
     }
 }
 
+fn run_connected(id: &str) -> Result<(), String> {
+    // Drop the runner before releasing the enrollment lock.
+    let mut running: Option<(runner::Runner, std::fs::File)> = None;
+    let mut next_heartbeat = std::time::Instant::now();
+    eprintln!("Machine {id} connected. Stop with Ctrl-C.");
+    loop {
+        if std::time::Instant::now() >= next_heartbeat {
+            match heartbeat(id) {
+                Ok(()) if running.is_none() => {
+                    let lock = runner::prepare(id)?;
+                    running = Some((runner::Runner::new()?, lock));
+                }
+                Ok(()) => {}
+                Err(HeartbeatError::Temporary(message)) => {
+                    eprintln!("{message}; retrying in 30 seconds");
+                }
+                Err(HeartbeatError::Permanent(message)) => return Err(message),
+            }
+            next_heartbeat = std::time::Instant::now() + Duration::from_secs(30);
+        }
+        if let Some((runner, _)) = &mut running {
+            let config = load_config()?;
+            let machine = config
+                .machines
+                .iter()
+                .find(|machine| machine.id == id)
+                .ok_or("machine not enrolled")?;
+            if api_url(&config) != machine.api_url {
+                return Err("machine belongs to a different API".into());
+            }
+            if let Err(message) = runner.poll(machine) {
+                eprintln!("{message}");
+            }
+        }
+        thread::sleep(Duration::from_secs(1));
+    }
+}
+
 pub(super) fn run(args: &[String]) -> Result<(), String> {
     match args {
         [command, rest @ ..] if command == "enroll" => enroll(rest),
         [command, id] if command == "heartbeat" => heartbeat(id).map_err(|error| match error {
             HeartbeatError::Permanent(message) | HeartbeatError::Temporary(message) => message,
         }),
-        [command, id] if command == "run" => {
-            let _lock = runner::prepare(id)?;
-            let mut runner = runner::Runner::new()?;
-            let mut next_heartbeat = std::time::Instant::now();
-            eprintln!("Machine {id} connected. Stop with Ctrl-C.");
-            loop {
-              if std::time::Instant::now() >= next_heartbeat {
-                match heartbeat(id) {
-                    Ok(()) => {},
-                    Err(HeartbeatError::Temporary(message)) => eprintln!("{message}; retrying in 30 seconds"),
-                    Err(HeartbeatError::Permanent(message)) => return Err(message),
-                }
-                next_heartbeat = std::time::Instant::now() + Duration::from_secs(30);
-              }
-              let config = load_config()?;
-              let machine = config.machines.iter().find(|machine| machine.id == *id)
-                  .ok_or("machine not enrolled")?;
-              if api_url(&config) != machine.api_url { return Err("machine belongs to a different API".into()); }
-              if let Err(message) = runner.poll(machine) { eprintln!("{message}"); }
-              thread::sleep(Duration::from_secs(1));
-            }
-        }
+        [command, id] if command == "run" => run_connected(id),
         [command] if command == "list" => {
             for machine in load_config()?.machines {
                 println!("{} {} {}", machine.id, machine.scope, machine.api_url);

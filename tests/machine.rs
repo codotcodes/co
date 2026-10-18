@@ -5,7 +5,7 @@ use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 struct Fixture(PathBuf);
 
@@ -216,8 +216,30 @@ fn setup_key_is_read_from_stdin_and_never_echoed() {
 }
 
 #[test]
+fn connected_harness_still_requires_the_container_runtime() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let api = format!("http://{}", listener.local_addr().unwrap());
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let (path, _, _) = receive(&mut stream);
+        assert_eq!(path, "/machine-enrollment/heartbeat");
+        reply(&mut stream, "204 No Content", json!(null));
+    });
+    let fixture = Fixture::new();
+    fs::write(
+        fixture.0.join("config.json"),
+        json!({"machines":[{"id":"test-id","scope":"owner","api_url":api,"credential":"co_runner_secret"}]}).to_string(),
+    ).unwrap();
+    let output = fixture.run(&api, &["run", "test-id"], None);
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("unable to clean up previous jobs"));
+    server.join().unwrap();
+}
+
+#[test]
 fn foreground_harness_survives_a_temporary_disconnect() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
     let api = format!("http://{}", listener.local_addr().unwrap());
     let fixture = Fixture::new();
     fs::write(
@@ -229,11 +251,32 @@ fn foreground_harness_survives_a_temporary_disconnect() {
         .env("CO_CONFIG_DIR", &fixture.0)
         .env("CO_API_URL", &api)
         .env("NO_PROXY", "127.0.0.1")
+        .env("PATH", "")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
-    let (mut stream, _) = listener.accept().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let (mut stream, _) = loop {
+        match listener.accept() {
+            Ok(connection) => break connection,
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                if Instant::now() >= deadline || child.try_wait().unwrap().is_some() {
+                    let _ = child.kill();
+                    let output = child.wait_with_output().unwrap();
+                    panic!(
+                        "runner did not send a heartbeat: {}",
+                        String::from_utf8_lossy(&output.stderr)
+                    );
+                }
+                thread::sleep(Duration::from_millis(10));
+            }
+            Err(error) => panic!("heartbeat listener failed: {error}"),
+        }
+    };
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
     let (path, _, _) = receive(&mut stream);
     assert_eq!(path, "/machine-enrollment/heartbeat");
     reply(
