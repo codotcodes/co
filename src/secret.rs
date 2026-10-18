@@ -249,7 +249,7 @@ fn print_secret_help() {
     println!("  co secret set DATABASE_URL --owner my-org --value-file ./secret.txt");
 }
 
-fn validate_secret_name(name: &str) -> Result<(), String> {
+pub(super) fn validate_secret_name(name: &str) -> Result<(), String> {
     if name.is_empty() || name.len() > SECRET_NAME_MAX {
         return Err("secret name must be 1 to 100 characters".into());
     }
@@ -268,7 +268,7 @@ fn validate_secret_name(name: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn validate_secret_value(value: &str) -> Result<(), String> {
+pub(super) fn validate_secret_value(value: &str) -> Result<(), String> {
     if value.len() > MAX_VALUE_BYTES {
         return Err(format!(
             "secret value exceeds {MAX_VALUE_BYTES} UTF-8 bytes"
@@ -286,7 +286,7 @@ fn validate_secret_value(value: &str) -> Result<(), String> {
 /// not supported in this terminal-only slice; report an actionable limitation
 /// rather than silently downgrading. No available method means the account must
 /// enroll a passkey or authenticator first.
-fn select_reauth_method(methods: &[String]) -> Result<String, String> {
+pub(super) fn select_reauth_method(methods: &[String]) -> Result<String, String> {
     if methods.iter().any(|m| m == "password") {
         return Ok("password".to_string());
     }
@@ -349,7 +349,7 @@ fn read_bounded(reader: impl Read, limit: usize) -> Result<String, String> {
     Ok(value)
 }
 
-fn read_secret_value(value_file: Option<&std::path::Path>) -> Result<String, String> {
+pub(super) fn read_secret_value(value_file: Option<&std::path::Path>) -> Result<String, String> {
     if let Some(path) = value_file {
         let file = std::fs::File::open(path).map_err(|_| "unable to open secret value file")?;
         return read_bounded(file, MAX_VALUE_BYTES);
@@ -381,7 +381,7 @@ fn read_reauth_credential(prompt: &str, path: Option<&std::path::Path>) -> Resul
 }
 
 /// Prompt for the reauthentication proof matching the chosen method.
-fn prompt_reauth_proof(
+pub(super) fn prompt_reauth_proof(
     method: &str,
     path: Option<&std::path::Path>,
 ) -> Result<serde_json::Value, String> {

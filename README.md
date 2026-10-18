@@ -36,6 +36,11 @@ co machine enroll --owner OWNER --label LABEL
 co machine list
 co machine run MACHINE_ID
 co workflow check [FILE]
+co deployment list OWNER/REPO
+co deployment configure OWNER/REPO ENV --file POLICY.json
+co deployment set-secret OWNER/REPO NAME --environment ENV
+co deployment approve OWNER/REPO DEPLOYMENT_ID
+co deployment rollback OWNER/REPO DEPLOYMENT_ID
 co secret set NAME --owner OWNER
 co secret set NAME --repo OWNER/REPO
 co doctor
@@ -57,6 +62,12 @@ Rootless Podman and a locally available image are required for execution. The de
 `co workflow check` validates `.co/workflows/*.ts` in the current repository, or a single direct file with `co workflow check .co/workflows/verify.ts`. Install `@cocodes/workflows` into the repository first and run the command at the repository root. The checker requires Bun, parses TypeScript without evaluating repository code or contacting the API, and reports file/line diagnostics. Dynamic job generation is unsupported in v1.
 
 Unix runners support `artifact: { name: "site", path: "dist" }` on a job. After all steps succeed, the harness uploads that directory through its live assignment, without enabling container networking. Outputs must contain only regular files: symbolic links, hard links, special files, traversal paths and empty artifacts are rejected. Limits are 4096 files, 8192 inspected entries and 32 MiB per bundle. Artifact-producing jobs cannot reference secrets. The controller must have private artifact storage configured; unsupported runners or missing storage fail closed. The server binds verified bytes to the exact job and commit and requires the receipt before accepting success. This is a build handoff, not deployment support.
+
+### Native deployments
+
+`co deployment configure OWNER/REPO ENV --file POLICY.json` creates or updates an owner-managed deployment environment. The policy names the protected branch, required native jobs, build artifact and Cloudflare Worker target. `co deployment set-secret OWNER/REPO NAME --environment ENV` reads a write-only deployment secret from an echo-disabled prompt, standard input, or `--value-file PATH`. Omit `--environment` for a repository-scoped deployment secret. These secrets are separate from ordinary workflow secrets and are never passed to build jobs.
+
+`co deployment list OWNER/REPO` prints deployment receipts. Use `co deployment approve OWNER/REPO ID` to approve an exact pending build, or `co deployment rollback OWNER/REPO ID` to request a new deployment of a recorded successful provider version. All mutations require an explicit human session and fresh password or authenticator verification; `--reauth-file PATH` supports a separate private credential file. Passkey-only accounts require a browser-based flow. The CLI never accepts secret values in arguments and never prints secret or authentication input. Uncertain promotions remain locked for operator investigation, not force-retried.
 
 ### Workflow secrets
 

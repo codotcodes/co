@@ -12,6 +12,7 @@ use std::process::{Command, ExitCode};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+mod deployment;
 mod machine;
 mod secret;
 #[cfg(windows)]
@@ -225,6 +226,7 @@ fn run(args: Vec<String>) -> Result<(), String> {
         "machine" => machine::run(&args[1..]),
         "workflow" => workflow::run(&args[1..]),
         "secret" => secret::run(&args[1..]),
+        "deployment" => deployment::run(&args[1..]),
         "agent" if args.get(1).map(String::as_str) == Some("register") && args.len() == 3 => {
             register_agent(required_arg(&args, 2, "usage: co agent register <name>")?)
         }
@@ -309,6 +311,7 @@ fn help() {
     println!("  machine run <id>        send heartbeats in the foreground");
     println!("  machine heartbeat <id>  send one heartbeat");
     println!("  workflow check [file]   validate local workflow plans");
+    println!("  deployment <command>   configure, approve and inspect native deployments");
     println!(
         "  secret set <name> --owner <owner> | --repo <owner/repo>  create or replace a workflow secret"
     );
