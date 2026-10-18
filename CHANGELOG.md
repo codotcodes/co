@@ -4,6 +4,8 @@ All notable changes are documented here. This project follows semantic versionin
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-10-18
+
 - Configure deployment environments and write-only secrets, inspect deployment receipts, and approve or roll back native deployments.
 - Publish declared build artifacts from Unix runners without granting network access to build steps.
 
