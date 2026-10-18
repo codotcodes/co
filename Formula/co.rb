@@ -2,29 +2,29 @@
 class Co < Formula
   desc "Human command-line client for co.codes"
   homepage "https://co.codes"
-  version "0.9.0"
+  version "0.10.0"
   license any_of: ["MIT", "Apache-2.0"]
   depends_on "git"
 
   on_macos do
     on_arm do
-      url "https://github.com/codotcodes/co/releases/download/v0.9.0/co-aarch64-apple-darwin.tar.gz"
-      sha256 "b6e9f92a6aca361e6a274d7a2b817821f0013b0f0579ecbd7cd80ba1156c37d3"
+      url "https://github.com/codotcodes/co/releases/download/v0.10.0/co-aarch64-apple-darwin.tar.gz"
+      sha256 "9469b886b9e9dfd8a9794334e090baf71cc9ce603847cf3fc052c4dd3e6c9ccb"
     end
     on_intel do
-      url "https://github.com/codotcodes/co/releases/download/v0.9.0/co-x86_64-apple-darwin.tar.gz"
-      sha256 "3a5e7a1a85f48ed67830ff3fb38d9afae78508653f4ce2f6ccc214af2ddec930"
+      url "https://github.com/codotcodes/co/releases/download/v0.10.0/co-x86_64-apple-darwin.tar.gz"
+      sha256 "9f2f7512818ebf5f2c54f60bcb7b73a56c88d42a69c721142d9a0ca9f7818c94"
     end
   end
 
   on_linux do
     on_arm do
-      url "https://github.com/codotcodes/co/releases/download/v0.9.0/co-aarch64-unknown-linux-musl.tar.gz"
-      sha256 "5a6d615543f2698076edf4bcaec58c7375fab19f881da551b7e82515719b79dd"
+      url "https://github.com/codotcodes/co/releases/download/v0.10.0/co-aarch64-unknown-linux-musl.tar.gz"
+      sha256 "fa1239af29ce6d01f76c81380aa83de3e2e1d03c4069f09f94ee70a2302c74f3"
     end
     on_intel do
-      url "https://github.com/codotcodes/co/releases/download/v0.9.0/co-x86_64-unknown-linux-musl.tar.gz"
-      sha256 "3c6f3f95ee135129c078e9e280f3dce3104cfd36c3aa178798aa02692c727086"
+      url "https://github.com/codotcodes/co/releases/download/v0.10.0/co-x86_64-unknown-linux-musl.tar.gz"
+      sha256 "459b145d2becdfb22a411e27849884fd4c53dc95f299c531bb59b4465b56f4e0"
     end
   end
 
