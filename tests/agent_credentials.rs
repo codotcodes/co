@@ -85,6 +85,7 @@ fn attestation_uses_selected_agent_lineage_and_explicit_commit() {
                     Err(e) => panic!("{e}"),
                 }
             };
+            stream.set_nonblocking(false).unwrap();
             stream
                 .set_read_timeout(Some(Duration::from_secs(5)))
                 .unwrap();
