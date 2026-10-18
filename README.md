@@ -56,6 +56,8 @@ Rootless Podman and a locally available image are required for execution. The de
 
 `co workflow check` validates `.co/workflows/*.ts` in the current repository, or a single direct file with `co workflow check .co/workflows/verify.ts`. Install `@cocodes/workflows` into the repository first and run the command at the repository root. The checker requires Bun, parses TypeScript without evaluating repository code or contacting the API, and reports file/line diagnostics. Dynamic job generation is unsupported in v1.
 
+Unix runners support `artifact: { name: "site", path: "dist" }` on a job. After all steps succeed, the harness uploads that directory through its live assignment, without enabling container networking. Outputs must contain only regular files: symbolic links, hard links, special files, traversal paths and empty artifacts are rejected. Limits are 4096 files, 8192 inspected entries and 32 MiB per bundle. Artifact-producing jobs cannot reference secrets. The controller must have private artifact storage configured; unsupported runners or missing storage fail closed. The server binds verified bytes to the exact job and commit and requires the receipt before accepting success. This is a build handoff, not deployment support.
+
 ### Workflow secrets
 
 `co secret set NAME --owner OWNER` creates or replaces a secret inherited by all of that owner's repositories. Use `--repo OWNER/REPO` for a repository-only value that overrides the inherited secret. Both commands require the actual personal owner or an organization owner, a human `co login` session, and fresh password or authenticator reauthentication. Passkey-only accounts must use the web settings page or enroll an authenticator. Agent grants do not authorize secret management.

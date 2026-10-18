@@ -1,4 +1,5 @@
 use super::MachineIdentity;
+use super::artifacts;
 use super::live_logs::{self, Logs};
 use crate::{client, decode, network_error};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -37,6 +38,8 @@ struct Assignment {
     environment: BTreeMap<String, String>,
     #[serde(default)]
     secret_values: Vec<String>,
+    #[serde(default)]
+    artifact: Option<artifacts::Output>,
 }
 
 #[derive(Deserialize)]
@@ -191,10 +194,14 @@ fn memory_budget(memory_mib: u64, cpus: u32, requested: u32) -> u32 {
 }
 
 fn next_job(machine: &MachineIdentity) -> Result<Option<Assignment>, String> {
+    let mut capabilities = vec!["workflow-environment-v1", "cpu-slots-v1"];
+    if cfg!(unix) {
+        capabilities.push("workflow-artifacts-v1");
+    }
     let response = post(
         machine,
         "/machine-enrollment/next-job",
-        serde_json::json!({"capabilities": ["workflow-environment-v1", "cpu-slots-v1"]}),
+        serde_json::json!({"capabilities": capabilities}),
     )?;
     if response.status() == reqwest::StatusCode::NO_CONTENT {
         return Ok(None);
@@ -229,6 +236,37 @@ fn finish(
     } else {
         decode(response)?
     };
+    Ok(())
+}
+
+fn upload_artifact(
+    machine: &MachineIdentity,
+    job: &Assignment,
+    bytes: Vec<u8>,
+) -> Result<(), String> {
+    let digest = artifacts::digest(&bytes);
+    let size = bytes.len();
+    let response = client()?
+        .post(format!(
+            "{}/machine-enrollment/jobs/{}/artifact",
+            machine.api_url, job.id
+        ))
+        .bearer_auth(&machine.credential)
+        .header("Content-Type", "application/vnd.co.artifact")
+        .header("X-Co-Assignment", &job.assignment_token)
+        .header("X-Co-Artifact-Sha256", &digest)
+        .timeout(Duration::from_secs(30))
+        .body(bytes)
+        .send()
+        .map_err(network_error)?;
+    if !response.status().is_success() {
+        return Err("artifact upload rejected".into());
+    }
+    let receipt: serde_json::Value = response.json().map_err(|_| "invalid artifact receipt")?;
+    if receipt["digest"].as_str() != Some(&digest) || receipt["size"].as_u64() != Some(size as u64)
+    {
+        return Err("invalid artifact receipt".into());
+    }
     Ok(())
 }
 
@@ -273,6 +311,10 @@ fn valid_job(job: &Assignment, api_url: &str) -> bool {
         && !job.assignment_token.is_empty()
         && job.steps.len() <= 20
         && valid_environment(job)
+        && job
+            .artifact
+            .as_ref()
+            .is_none_or(|output| cfg!(unix) && output.valid() && job.secret_values.is_empty())
 }
 
 fn valid_environment(job: &Assignment) -> bool {
@@ -618,6 +660,28 @@ fn execute(
                 break;
             }
         }
+        if steps.len() == job.steps.len()
+            && steps.iter().all(|step| step.exit_code == 0)
+            && !cancelled.load(Ordering::Relaxed)
+        {
+            if let Some(output) = &job.artifact {
+                let published = artifacts::collect(&root.path().join("source"), output)
+                    .and_then(|bytes| upload_artifact(machine, job, bytes));
+                if published.is_err() {
+                    let index = steps.len().saturating_sub(1);
+                    if let Some(last) = steps.last_mut() {
+                        live_logs::append(
+                            &logs,
+                            index,
+                            "\nArtifact publication failed. Check the output directory, limits and storage availability.",
+                        );
+                        logs.lock().unwrap()[index].exit_code = Some(1);
+                        last.exit_code = 1;
+                        last.output = logs.lock().unwrap()[index].output.clone();
+                    }
+                }
+            }
+        }
         Ok::<_, String>(steps)
     })();
     upload_stop.store(true, Ordering::Relaxed);
@@ -879,6 +943,7 @@ mod tests {
             ram_mib: 128,
             environment: BTreeMap::new(),
             secret_values: vec![],
+            artifact: None,
             machine_id: String::new(),
         };
         assert!(valid_job(&job, "https://api.co.codes"));
@@ -900,6 +965,7 @@ mod tests {
             ram_mib: 128,
             environment: BTreeMap::new(),
             secret_values: vec![],
+            artifact: None,
             machine_id: String::new(),
         };
         assert!(valid_job(&local, "https://api.co.localhost"));
@@ -931,6 +997,7 @@ mod tests {
             ram_mib: 128,
             environment: BTreeMap::new(),
             secret_values: vec![],
+            artifact: None,
             machine_id: String::new(),
         };
         let step = Step { name: "Isolation".into(),
@@ -1007,7 +1074,7 @@ mod tests {
             checkout_url: format!("file://{}", source.display()), commit_oid: oid.trim().to_owned(),
             steps: vec![Step { name: "Verify".into(),
                 run: "test \"$(cat payload.txt)\" = 'verified commit' && test -z \"$GIT_CONFIG_VALUE_0\" && echo passed".into() }],
-            vcpus: 1, ram_mib: 128, environment: BTreeMap::new(), secret_values: vec![], machine_id: String::new() };
+            vcpus: 1, ram_mib: 128, environment: BTreeMap::new(), secret_values: vec![], artifact: None, machine_id: String::new() };
         let machine = MachineIdentity {
             id: "test".into(),
             scope: "owner".into(),
@@ -1029,6 +1096,11 @@ mod tests {
     }
 
     fn read_request(stream: &mut TcpStream) -> (String, serde_json::Value) {
+        let (path, body) = read_raw_request(stream);
+        (path, serde_json::from_slice(&body).unwrap())
+    }
+
+    fn read_raw_request(stream: &mut TcpStream) -> (String, Vec<u8>) {
         let mut bytes = Vec::new();
         let (end, length, path) = loop {
             let mut buffer = [0u8; 4096];
@@ -1062,10 +1134,122 @@ mod tests {
             assert!(count > 0);
             bytes.extend_from_slice(&buffer[..count]);
         }
-        (
-            path,
-            serde_json::from_slice(&bytes[end..end + length]).unwrap(),
+        (path, bytes[end..end + length].to_vec())
+    }
+
+    #[test]
+    #[ignore = "requires Git, rootless Podman and the pinned Alpine image"]
+    fn isolated_build_uploads_artifact_and_reports_upload_failure() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("source.git");
+        assert!(
+            Command::new("git")
+                .args(["init", "--quiet"])
+                .arg(&source)
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(
+            Command::new("git")
+                .current_dir(&source)
+                .args([
+                    "-c",
+                    "user.name=CI",
+                    "-c",
+                    "user.email=ci@example.test",
+                    "-c",
+                    "commit.gpgsign=false",
+                    "commit",
+                    "--allow-empty",
+                    "--quiet",
+                    "-m",
+                    "Fixture"
+                ])
+                .status()
+                .unwrap()
+                .success()
+        );
+        let oid = String::from_utf8(
+            Command::new("git")
+                .current_dir(&source)
+                .args(["rev-parse", "HEAD"])
+                .output()
+                .unwrap()
+                .stdout,
         )
+        .unwrap()
+        .trim()
+        .to_owned();
+        for accepted in [true, false] {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let api_url = format!("http://{}", listener.local_addr().unwrap());
+            let server = thread::spawn(move || {
+                let deadline = Instant::now() + Duration::from_secs(30);
+                loop {
+                    assert!(
+                        Instant::now() < deadline,
+                        "artifact upload was not received"
+                    );
+                    let (mut stream, _) = match listener.accept() {
+                        Ok(connection) => connection,
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            thread::sleep(Duration::from_millis(10));
+                            continue;
+                        }
+                        Err(error) => panic!("{error}"),
+                    };
+                    let (path, bytes) = read_raw_request(&mut stream);
+                    if path.ends_with("/artifact") {
+                        assert_eq!(&bytes[..6], b"COAR1\0");
+                        assert!(bytes.ends_with(b"<h1>Astro</h1>"));
+                        let body = serde_json::json!({"id":"artifact", "digest":artifacts::digest(&bytes), "size":bytes.len()}).to_string();
+                        let status = if accepted {
+                            "201 Created"
+                        } else {
+                            "503 Unavailable"
+                        };
+                        write!(stream, "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+                        break;
+                    }
+                    assert!(path.ends_with("/log-deltas"));
+                    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                    let reply = serde_json::json!({"type":"ack", "hash":body["update"]["hash"]})
+                        .to_string();
+                    write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reply}", reply.len()).unwrap();
+                }
+            });
+            let job: Assignment = serde_json::from_value(serde_json::json!({
+                "id":format!("co-artifact-{}-{accepted}", std::process::id()), "assignmentToken":"checkout-token",
+                "checkoutUrl":format!("file://{}", source.display()), "commitOid":oid,
+                "steps":[{"name":"Build", "run":"test \"$(ls /sys/class/net)\" = lo; test -z \"$GIT_CONFIG_VALUE_0\"; mkdir dist; printf '<h1>Astro</h1>' > dist/index.html"}],
+                "artifact":{"name":"site", "path":"dist"}, "vcpus":1, "ramMiB":128,
+            })).unwrap();
+            let machine = MachineIdentity {
+                id: "test".into(),
+                scope: "public".into(),
+                api_url,
+                credential: "co_runner_test".into(),
+            };
+            let (steps, success) = execute(
+                &machine,
+                &job,
+                Instant::now(),
+                Arc::new(AtomicBool::new(false)),
+            );
+            server.join().unwrap();
+            assert_eq!(
+                success,
+                accepted,
+                "{:?}",
+                steps.iter().map(|s| &s.output).collect::<Vec<_>>()
+            );
+            assert_eq!(steps[0].exit_code, if accepted { 0 } else { 1 });
+            if !accepted {
+                assert!(steps[0].output.contains("Artifact publication failed"));
+            }
+        }
     }
 
     #[test]

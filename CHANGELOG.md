@@ -4,6 +4,8 @@ All notable changes are documented here. This project follows semantic versionin
 
 ## [Unreleased]
 
+- Publish declared build artifacts from Unix runners without granting network access to build steps.
+
 ## [0.9.0] - 2026-10-17
 
 - Match clone, link and Git credentials to the selected staging environment while preserving repository-scoped agent access.
