@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::io::{self, BufRead, IsTerminal};
 use std::thread;
 use std::time::Duration;
+mod action_outputs;
 mod artifacts;
 mod live_logs;
 mod runner;

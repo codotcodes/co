@@ -1,4 +1,5 @@
 use super::MachineIdentity;
+use super::action_outputs;
 use super::artifacts;
 use super::live_logs::{self, Logs};
 use crate::{client, decode, network_error};
@@ -55,6 +56,8 @@ struct Step {
     action_files: Vec<ActionFile>,
     #[serde(default)]
     action_network: Option<String>,
+    #[serde(default)]
+    action_outputs: Option<Vec<String>>,
 }
 
 #[derive(Deserialize)]
@@ -75,6 +78,8 @@ struct StepResult {
     name: String,
     exit_code: i32,
     output: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    outputs: Option<BTreeMap<String, String>>,
 }
 
 fn post(
@@ -217,6 +222,7 @@ fn next_job(machine: &MachineIdentity) -> Result<Option<Assignment>, String> {
     ];
     if cfg!(unix) {
         capabilities.push("workflow-artifacts-v1");
+        capabilities.push("repository-action-outputs-v1");
     }
     if machine.scope == "owner" && rootless_outbound_available() {
         capabilities.push("repository-actions-outbound-v1");
@@ -367,6 +373,13 @@ fn valid_job(job: &Assignment, api_url: &str) -> bool {
         && job.steps.len() <= 20
         && valid_environment(job)
         && job.steps.iter().all(|step| {
+            if step.action_outputs.as_ref().is_some_and(|keys| {
+                !cfg!(unix)
+                    || step.action_environment.is_none()
+                    || !action_outputs::valid_keys(keys)
+            }) {
+                return false;
+            }
             step_network(job, step).is_some()
                 && step
                     .action_environment
@@ -538,6 +551,7 @@ fn execute_step(
             name: step.name.clone(),
             exit_code: 1,
             output: message.into(),
+            outputs: None,
         };
     };
     let environment = match step
@@ -554,6 +568,7 @@ fn execute_step(
                 name: step.name.clone(),
                 exit_code: 1,
                 output: message.into(),
+                outputs: None,
             };
         }
     };
@@ -567,10 +582,15 @@ fn execute_step(
                 name: step.name.clone(),
                 exit_code: 1,
                 output: message.into(),
+                outputs: None,
             };
         }
     };
     let container = format!("co-{}-{index}", job.id);
+    let output_directory = step
+        .action_outputs
+        .as_ref()
+        .and_then(|_| tempfile::tempdir().ok());
     let mut command = Command::new("podman");
     command.args([
         "run",
@@ -602,6 +622,12 @@ fn execute_step(
     if !step.action_files.is_empty() {
         command.arg(format!("--volume={}:/inputs:ro,Z", inputs.path().display()));
     }
+    if let Some(directory) = &output_directory {
+        command.arg(format!(
+            "--volume={}:/run/co-action-output:rw,Z",
+            directory.path().display()
+        ));
+    }
     command.arg(format!(
         "--volume={}:{}:rw,Z",
         directory.display(),
@@ -612,7 +638,7 @@ fn execute_step(
         "/bin/sh",
         "-e",
         "-c",
-        ". /run/co-environment.sh\nexec /bin/sh -e -c \"$1\"",
+        if output_directory.is_some() { ". /run/co-environment.sh\nexport CO_ACTION_OUTPUT=/run/co-action-output/outputs.json\nexec /bin/sh -e -c \"$1\"" } else { ". /run/co-environment.sh\nexec /bin/sh -e -c \"$1\"" },
         "co-step",
         &step.run,
     ]);
@@ -627,6 +653,7 @@ fn execute_step(
                 name: step.name.clone(),
                 exit_code: 1,
                 output: live[index].output.clone(),
+                outputs: None,
             };
         }
     };
@@ -675,6 +702,17 @@ fn execute_step(
         name: step.name.clone(),
         exit_code,
         output,
+        outputs: if exit_code == 0 {
+            output_directory.as_ref().and_then(|directory| {
+                action_outputs::collect(
+                    directory.path(),
+                    step.action_outputs.as_ref().unwrap(),
+                    &job.secret_values,
+                )
+            })
+        } else {
+            None
+        },
     }
 }
 
@@ -731,6 +769,54 @@ fn action_input_directory(files: &[ActionFile]) -> Result<tempfile::TempDir, ()>
 #[cfg(test)]
 mod action_tests {
     use super::*;
+
+    #[test]
+    #[ignore = "requires rootless Podman and the pinned Alpine image"]
+    fn structured_outputs_use_a_fresh_channel_and_do_not_parse_stdout() {
+        let job: Assignment = serde_json::from_value(serde_json::json!({
+            "id": "output-fixture", "assignmentToken": "lease", "checkoutUrl": "https://git.co.codes/me/repo.git", "commitOid": "a".repeat(40), "vcpus": 1, "ramMiB": 128, "steps": [], "environment": {"TOKEN":"selected"}, "secretValues": ["selected"]
+        })).unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let step = Step {
+            name: "result".into(),
+            run: "test ! -e \"$CO_ACTION_OUTPUT\"; printf '%s' '{\"version_id\":\"v1\",\"url\":\"https://site.example/?token=selected\"}' > \"$CO_ACTION_OUTPUT\"; printf '%s' '{\"stdout_only\":\"not an output\"}'".into(),
+            action_environment: Some(BTreeMap::from([("SECRET_TOKEN".into(), "selected".into())])),
+            action_outputs: Some(vec!["version_id".into(), "url".into()]),
+            ..Step::default()
+        };
+        for _ in 0..2 {
+            let result = execute_step(
+                IMAGE,
+                root.path(),
+                &step,
+                &job,
+                &AtomicBool::new(false),
+                Instant::now() + STEP_TIMEOUT,
+                &Logs::default(),
+            );
+            assert_eq!(result.exit_code, 0, "{}", result.output);
+            assert_eq!(
+                result.outputs.unwrap(),
+                BTreeMap::from([("version_id".into(), "v1".into())])
+            );
+        }
+        let ordinary = Step {
+            name: "ordinary".into(),
+            run: "test -z \"$CO_ACTION_OUTPUT\"".into(),
+            ..Step::default()
+        };
+        let result = execute_step(
+            IMAGE,
+            root.path(),
+            &ordinary,
+            &job,
+            &AtomicBool::new(false),
+            Instant::now() + STEP_TIMEOUT,
+            &Logs::default(),
+        );
+        assert_eq!(result.exit_code, 0);
+        assert!(result.outputs.is_none());
+    }
 
     #[test]
     fn networking_requires_an_explicit_owner_action() {
@@ -923,11 +1009,12 @@ fn execute(
             return Err("CO_MACHINE_IMAGE must be pinned by digest".into());
         }
         let mut steps = Vec::new();
+        let mut output_bytes = 0;
         for step in &job.steps {
             if cancelled.load(Ordering::Relaxed) || Instant::now() >= deadline {
                 break;
             }
-            let result = execute_step(
+            let mut result = execute_step(
                 &image,
                 &root.path().join("source"),
                 step,
@@ -936,6 +1023,14 @@ fn execute(
                 deadline,
                 &logs,
             );
+            if let Some(outputs) = &result.outputs {
+                let size = action_outputs::size(outputs);
+                if output_bytes + size > action_outputs::JOB_BYTES {
+                    result.outputs = None;
+                } else {
+                    output_bytes += size;
+                }
+            }
             let failed = result.exit_code != 0;
             steps.push(result);
             if failed {
@@ -959,6 +1054,7 @@ fn execute(
                         );
                         logs.lock().unwrap()[index].exit_code = Some(1);
                         last.exit_code = 1;
+                        last.outputs = None;
                         last.output = logs.lock().unwrap()[index].output.clone();
                     }
                 }
@@ -987,6 +1083,7 @@ fn execute(
                 name: job.steps.first().map_or("Checkout", |s| &s.name).to_owned(),
                 exit_code: 1,
                 output: message,
+                outputs: None,
             }],
             false,
         ),
