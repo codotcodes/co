@@ -1,8 +1,53 @@
 use serde_json::{Value, json};
 use std::io::{Read, Write};
-use std::net::TcpListener;
+use std::net::{TcpListener, TcpStream};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
+
+fn configure_request_stream(stream: &TcpStream) {
+    // Windows inherits the listener's nonblocking mode on accepted sockets.
+    stream.set_nonblocking(false).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+}
+
+#[test]
+fn accepted_request_stream_waits_for_delayed_bytes() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+    let (mut stream, _) = listener.accept().unwrap();
+    // Windows accepted sockets inherit the nonblocking listener's mode.
+    stream.set_nonblocking(true).unwrap();
+    configure_request_stream(&stream);
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+    let ready = barrier.clone();
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let reader = std::thread::spawn(move || {
+        ready.wait();
+        let mut bytes = [0; 4];
+        sender
+            .send(stream.read_exact(&mut bytes).map(|_| bytes))
+            .unwrap();
+    });
+    barrier.wait();
+    assert!(
+        matches!(
+            receiver.recv_timeout(Duration::from_millis(50)),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+        ),
+        "accepted stream must wait for request bytes instead of returning WouldBlock"
+    );
+    client.write_all(b"ping").unwrap();
+    assert_eq!(
+        receiver
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap()
+            .unwrap(),
+        *b"ping"
+    );
+    reader.join().unwrap();
+}
 
 fn probe(
     args: &[&str],
@@ -39,9 +84,7 @@ fn probe(
                     Err(error) => panic!("{error}"),
                 }
             };
-            stream
-                .set_read_timeout(Some(Duration::from_secs(5)))
-                .unwrap();
+            configure_request_stream(&stream);
             let mut bytes = Vec::new();
             let end = loop {
                 let mut buffer = [0; 4096];
