@@ -4,6 +4,12 @@ All notable changes are documented here. This project follows semantic versionin
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-10-19
+
+- Run repository actions with only their selected secrets and verified artifact inputs.
+- Support explicitly declared outbound networking for actions on owner-controlled runners while keeping ordinary steps isolated.
+- Capture declared structured action outputs through a separate channel and omit values containing delivered secrets.
+
 ## [0.10.0] - 2026-10-18
 
 - Configure deployment environments and write-only secrets, inspect deployment receipts, and approve or roll back native deployments.
@@ -71,7 +77,9 @@ All notable changes are documented here. This project follows semantic versionin
 - Validate repository access in `clone` while smart HTTP remains unavailable.
 - Add Linux and macOS release packaging, Nix support, and the global installer.
 
-[Unreleased]: https://github.com/codotcodes/co/compare/v0.9.0...HEAD
+[Unreleased]: https://github.com/codotcodes/co/compare/v0.11.0...HEAD
+[0.11.0]: https://github.com/codotcodes/co/compare/v0.10.0...v0.11.0
+[0.10.0]: https://github.com/codotcodes/co/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/codotcodes/co/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/codotcodes/co/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/codotcodes/co/compare/v0.6.0...v0.7.0
