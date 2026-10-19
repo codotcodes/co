@@ -30,6 +30,8 @@ struct Assignment {
     assignment_token: String,
     checkout_url: String,
     commit_oid: String,
+    #[serde(default)]
+    scope: String,
     steps: Vec<Step>,
     vcpus: u32,
     #[serde(rename = "ramMiB")]
@@ -51,6 +53,8 @@ struct Step {
     action_environment: Option<BTreeMap<String, String>>,
     #[serde(default)]
     action_files: Vec<ActionFile>,
+    #[serde(default)]
+    action_network: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -214,6 +218,9 @@ fn next_job(machine: &MachineIdentity) -> Result<Option<Assignment>, String> {
     if cfg!(unix) {
         capabilities.push("workflow-artifacts-v1");
     }
+    if machine.scope == "owner" && rootless_outbound_available() {
+        capabilities.push("repository-actions-outbound-v1");
+    }
     let response = post(
         machine,
         "/machine-enrollment/next-job",
@@ -223,7 +230,39 @@ fn next_job(machine: &MachineIdentity) -> Result<Option<Assignment>, String> {
         return Ok(None);
     }
     let job: NextJob = decode(response)?;
+    if machine.scope != "owner"
+        && job
+            .job
+            .steps
+            .iter()
+            .any(|step| step.action_network.is_some())
+    {
+        return Err("outbound actions require an owner-scoped runner".into());
+    }
     Ok(Some(job.job))
+}
+
+fn rootless_outbound_available() -> bool {
+    Command::new("podman")
+        .args(["info", "--format", "{{.Host.Security.Rootless}}"])
+        .output()
+        .is_ok_and(|output| {
+            output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == "true"
+        })
+        && Command::new("slirp4netns")
+            .arg("--version")
+            .output()
+            .is_ok_and(|output| output.status.success())
+}
+
+fn step_network(job: &Assignment, step: &Step) -> Option<&'static str> {
+    match step.action_network.as_deref() {
+        None => Some("none"),
+        Some("outbound") if job.scope == "owner" && step.action_environment.is_some() => {
+            Some("slirp4netns:allow_host_loopback=false")
+        }
+        _ => None,
+    }
 }
 
 fn finish(
@@ -328,9 +367,11 @@ fn valid_job(job: &Assignment, api_url: &str) -> bool {
         && job.steps.len() <= 20
         && valid_environment(job)
         && job.steps.iter().all(|step| {
-            step.action_environment
-                .as_ref()
-                .is_none_or(valid_environment_map)
+            step_network(job, step).is_some()
+                && step
+                    .action_environment
+                    .as_ref()
+                    .is_none_or(valid_environment_map)
                 && step.action_files.len() <= 4096
                 && (step.action_files.is_empty() || step.action_environment.is_some())
                 && step.action_files.iter().all(|file| {
@@ -487,6 +528,18 @@ fn execute_step(
 ) -> StepResult {
     let index = logs.lock().unwrap().len();
     live_logs::begin(logs, &step.name);
+    let network = step_network(job, step)
+        .filter(|network| *network == "none" || rootless_outbound_available());
+    let Some(network) = network else {
+        let message = "Outbound actions require rootless networking on an owner-scoped runner.";
+        live_logs::append(logs, index, message);
+        logs.lock().unwrap()[index].exit_code = Some(1);
+        return StepResult {
+            name: step.name.clone(),
+            exit_code: 1,
+            output: message.into(),
+        };
+    };
     let environment = match step
         .action_environment
         .as_ref()
@@ -525,7 +578,6 @@ fn execute_step(
         "--pull=never",
         "--name",
         &container,
-        "--network=none",
         "--read-only",
         "--cap-drop=ALL",
         "--security-opt=no-new-privileges",
@@ -536,6 +588,7 @@ fn execute_step(
         "--env=HOME=/tmp",
         "--env=PATH=/usr/local/bin:/usr/bin:/bin",
     ]);
+    command.arg(format!("--network={network}"));
     command.arg(format!("--memory={}m", job.ram_mib));
     command.arg(format!("--label=io.co.codes.machine={}", job.machine_id));
     command.arg(format!("--memory-swap={}m", job.ram_mib));
@@ -678,6 +731,66 @@ fn action_input_directory(files: &[ActionFile]) -> Result<tempfile::TempDir, ()>
 #[cfg(test)]
 mod action_tests {
     use super::*;
+
+    #[test]
+    fn networking_requires_an_explicit_owner_action() {
+        let mut job: Assignment = serde_json::from_value(serde_json::json!({
+            "id": "network", "assignmentToken": "lease", "checkoutUrl": "https://git.co.codes/me/repo.git", "commitOid": "a".repeat(40), "vcpus": 1, "ramMiB": 128, "scope": "owner", "steps": []
+        })).unwrap();
+        let mut step = Step {
+            name: "action".into(),
+            run: "true".into(),
+            ..Step::default()
+        };
+        assert_eq!(step_network(&job, &step), Some("none"));
+        step.action_network = Some("outbound".into());
+        assert_eq!(step_network(&job, &step), None);
+        step.action_environment = Some(BTreeMap::new());
+        assert_eq!(
+            step_network(&job, &step),
+            Some("slirp4netns:allow_host_loopback=false")
+        );
+        job.scope = "public".into();
+        assert_eq!(step_network(&job, &step), None);
+        step.action_network = Some("host".into());
+        assert_eq!(step_network(&job, &step), None);
+        step.action_network = None;
+        assert_eq!(step_network(&job, &step), Some("none"));
+    }
+
+    #[test]
+    #[ignore = "requires rootless Podman, slirp4netns and the pinned Alpine image"]
+    fn outbound_owner_action_does_not_enable_networking_for_other_steps() {
+        assert!(rootless_outbound_available());
+        let job: Assignment = serde_json::from_value(serde_json::json!({
+            "id": "outbound-fixture", "assignmentToken": "lease", "checkoutUrl": "https://git.co.codes/me/repo.git", "commitOid": "a".repeat(40), "vcpus": 1, "ramMiB": 128, "scope": "owner", "steps": []
+        })).unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let outbound = Step {
+            name: "outbound".into(),
+            run: "found=; while read iface dest rest; do if test \"$dest\" = 00000000; then found=yes; fi; done < /proc/net/route; test \"$found\" = yes".into(),
+            action_environment: Some(BTreeMap::new()),
+            action_network: Some("outbound".into()),
+            ..Step::default()
+        };
+        let isolated = Step {
+            name: "isolated".into(),
+            run: "found=; while read iface dest rest; do if test \"$dest\" = 00000000; then found=yes; fi; done < /proc/net/route; test -z \"$found\"".into(),
+            ..Step::default()
+        };
+        for step in [outbound, isolated] {
+            let result = execute_step(
+                IMAGE,
+                root.path(),
+                &step,
+                &job,
+                &AtomicBool::new(false),
+                Instant::now() + STEP_TIMEOUT,
+                &Logs::default(),
+            );
+            assert_eq!(result.exit_code, 0, "{}", result.output);
+        }
+    }
 
     #[test]
     #[ignore = "requires rootless Podman and the pinned Alpine image"]
@@ -1107,6 +1220,7 @@ mod tests {
             assignment_token: "token".into(),
             checkout_url: "https://git.co.codes/owner/repo.git".into(),
             commit_oid: "a".repeat(40),
+            scope: "public".into(),
             steps: vec![],
             vcpus: 1,
             ram_mib: 128,
@@ -1127,6 +1241,7 @@ mod tests {
         let local = Assignment {
             checkout_url: "http://127.0.0.1:7700/owner/repo.git".into(),
             commit_oid: "a".repeat(40),
+            scope: "public".into(),
             id: "test".into(),
             assignment_token: "token".into(),
             steps: vec![],
@@ -1161,6 +1276,7 @@ mod tests {
             assignment_token: "secret-token".into(),
             checkout_url: "https://git.co.codes/test/repo.git".into(),
             commit_oid: "a".repeat(40),
+            scope: "public".into(),
             steps: vec![],
             vcpus: 1,
             ram_mib: 128,
@@ -1240,7 +1356,7 @@ mod tests {
         .unwrap();
         let job = Assignment { id: "00000000-0000-4000-8000-000000000002".into(),
             assignment_token: "not-visible-inside-container".into(),
-            checkout_url: format!("file://{}", source.display()), commit_oid: oid.trim().to_owned(),
+            checkout_url: format!("file://{}", source.display()), commit_oid: oid.trim().to_owned(), scope: "owner".into(),
             steps: vec![Step { name: "Verify".into(),
                 run: "test \"$(cat payload.txt)\" = 'verified commit' && test -z \"$GIT_CONFIG_VALUE_0\" && echo passed".into(), ..Step::default() }],
             vcpus: 1, ram_mib: 128, environment: BTreeMap::new(), secret_values: vec![], artifact: None, machine_id: String::new() };
