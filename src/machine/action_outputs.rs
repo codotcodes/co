@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
+#[cfg(unix)]
 use std::io::Read;
 use std::path::Path;
 
@@ -26,6 +27,7 @@ pub(super) fn size(outputs: &BTreeMap<String, String>) -> usize {
         .sum()
 }
 
+#[cfg(unix)]
 fn encoded_secret(secret: &str) -> String {
     let mut result = String::new();
     for byte in secret.bytes() {
@@ -95,7 +97,7 @@ pub(super) fn collect(
     None
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     #[test]
