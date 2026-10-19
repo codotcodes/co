@@ -42,10 +42,22 @@ struct Assignment {
     artifact: Option<artifacts::Output>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
 struct Step {
     name: String,
     run: String,
+    #[serde(default)]
+    action_environment: Option<BTreeMap<String, String>>,
+    #[serde(default)]
+    action_files: Vec<ActionFile>,
+}
+
+#[derive(Deserialize)]
+struct ActionFile {
+    path: String,
+    content: String,
+    sha256: String,
 }
 
 #[derive(Deserialize)]
@@ -194,7 +206,11 @@ fn memory_budget(memory_mib: u64, cpus: u32, requested: u32) -> u32 {
 }
 
 fn next_job(machine: &MachineIdentity) -> Result<Option<Assignment>, String> {
-    let mut capabilities = vec!["workflow-environment-v1", "cpu-slots-v1"];
+    let mut capabilities = vec![
+        "workflow-environment-v1",
+        "cpu-slots-v1",
+        "repository-actions-v1",
+    ];
     if cfg!(unix) {
         capabilities.push("workflow-artifacts-v1");
     }
@@ -311,6 +327,25 @@ fn valid_job(job: &Assignment, api_url: &str) -> bool {
         && !job.assignment_token.is_empty()
         && job.steps.len() <= 20
         && valid_environment(job)
+        && job.steps.iter().all(|step| {
+            step.action_environment
+                .as_ref()
+                .is_none_or(valid_environment_map)
+                && step.action_files.len() <= 4096
+                && (step.action_files.is_empty() || step.action_environment.is_some())
+                && step.action_files.iter().all(|file| {
+                    artifacts::valid_path(&file.path)
+                        && file.sha256.len() == 64
+                        && file.sha256.bytes().all(|b| b.is_ascii_hexdigit())
+                })
+        })
+        && job
+            .steps
+            .iter()
+            .flat_map(|step| &step.action_files)
+            .map(|file| file.content.len())
+            .sum::<usize>()
+            <= 45 * 1024 * 1024
         && job
             .artifact
             .as_ref()
@@ -318,9 +353,23 @@ fn valid_job(job: &Assignment, api_url: &str) -> bool {
 }
 
 fn valid_environment(job: &Assignment) -> bool {
-    job.environment.len() <= 100
-        && job.environment.values().map(String::len).sum::<usize>() <= 65_536
-        && job.environment.iter().all(|(name, value)| {
+    valid_environment_map(&job.environment)
+        && job.secret_values.len() <= 100
+        && job.secret_values.iter().all(|secret| {
+            !secret.is_empty()
+                && (job.environment.values().any(|value| value == secret)
+                    || job
+                        .steps
+                        .iter()
+                        .filter_map(|step| step.action_environment.as_ref())
+                        .any(|environment| environment.values().any(|value| value == secret)))
+        })
+}
+
+fn valid_environment_map(environment: &BTreeMap<String, String>) -> bool {
+    environment.len() <= 100
+        && environment.values().map(String::len).sum::<usize>() <= 65_536
+        && environment.iter().all(|(name, value)| {
             !name.is_empty()
                 && name.len() <= 100
                 && name.bytes().enumerate().all(|(i, c)| {
@@ -345,10 +394,6 @@ fn valid_environment(job: &Assignment) -> bool {
                     .any(|prefix| name.starts_with(prefix))
                 && value.len() <= 16_384
                 && !value.contains('\0')
-        })
-        && job.secret_values.len() <= 100
-        && job.secret_values.iter().all(|secret| {
-            !secret.is_empty() && job.environment.values().any(|value| value == secret)
         })
 }
 
@@ -442,10 +487,27 @@ fn execute_step(
 ) -> StepResult {
     let index = logs.lock().unwrap().len();
     live_logs::begin(logs, &step.name);
-    let environment = match environment_file(job) {
+    let environment = match step
+        .action_environment
+        .as_ref()
+        .map_or_else(|| environment_file(job), environment_values_file)
+    {
         Ok(file) => file,
         Err(()) => {
             let message = "Unable to prepare the workflow environment.";
+            live_logs::append(logs, index, message);
+            logs.lock().unwrap()[index].exit_code = Some(1);
+            return StepResult {
+                name: step.name.clone(),
+                exit_code: 1,
+                output: message.into(),
+            };
+        }
+    };
+    let inputs = match action_input_directory(&step.action_files) {
+        Ok(directory) => directory,
+        Err(()) => {
+            let message = "Unable to prepare verified action inputs.";
             live_logs::append(logs, index, message);
             logs.lock().unwrap()[index].exit_code = Some(1);
             return StepResult {
@@ -484,6 +546,9 @@ fn execute_step(
         "--volume={}:/run/co-environment.sh:ro,Z",
         environment.path().display()
     ));
+    if !step.action_files.is_empty() {
+        command.arg(format!("--volume={}:/inputs:ro,Z", inputs.path().display()));
+    }
     command.arg(format!(
         "--volume={}:{}:rw,Z",
         directory.display(),
@@ -564,14 +629,118 @@ fn environment_file(job: &Assignment) -> Result<tempfile::NamedTempFile, ()> {
     if !valid_environment(job) {
         return Err(());
     }
+    environment_values_file(&job.environment)
+}
+
+fn environment_values_file(
+    environment: &BTreeMap<String, String>,
+) -> Result<tempfile::NamedTempFile, ()> {
+    if !valid_environment_map(environment) {
+        return Err(());
+    }
     // NamedTempFile is owner-only and unlinks on drop, including failed steps.
     let mut file = tempfile::NamedTempFile::new().map_err(|_| ())?;
-    for (name, value) in &job.environment {
+    for (name, value) in environment {
         let quoted = value.replace('\'', "'\\''");
         writeln!(file, "export {name}='{quoted}'").map_err(|_| ())?;
     }
     file.flush().map_err(|_| ())?;
     Ok(file)
+}
+
+fn action_input_directory(files: &[ActionFile]) -> Result<tempfile::TempDir, ()> {
+    if files.len() > 4096 {
+        return Err(());
+    }
+    let directory = tempfile::tempdir().map_err(|_| ())?;
+    let mut bytes = 0;
+    for file in files {
+        if !artifacts::valid_path(&file.path) {
+            return Err(());
+        }
+        let content = STANDARD.decode(&file.content).map_err(|_| ())?;
+        bytes += content.len();
+        if bytes > artifacts::MAX_BYTES || artifacts::digest(&content) != file.sha256 {
+            return Err(());
+        }
+        let path = directory.path().join(&file.path);
+        std::fs::create_dir_all(path.parent().ok_or(())?).map_err(|_| ())?;
+        let mut output = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+            .map_err(|_| ())?;
+        output.write_all(&content).map_err(|_| ())?;
+    }
+    Ok(directory)
+}
+
+#[cfg(test)]
+mod action_tests {
+    use super::*;
+
+    #[test]
+    #[ignore = "requires rootless Podman and the pinned Alpine image"]
+    fn isolated_action_receives_only_selected_secrets_and_artifacts() {
+        let job: Assignment = serde_json::from_value(serde_json::json!({
+            "id": "action-fixture", "assignmentToken": "lease", "checkoutUrl": "https://git.co.codes/me/repo.git", "commitOid": "a".repeat(40), "vcpus": 1, "ramMiB": 128,
+            "environment": {"JOB_TOKEN": "unrelated"}, "secretValues": ["unrelated", "selected"],
+            "steps": [{"name": "action", "run": "test -z \"$JOB_TOKEN\"; test \"$SECRET_TOKEN\" = selected; test \"$(cat /inputs/first/a.txt)\" = fixture; test \"$(cat /inputs/second/b.txt)\" = other; if (printf forbidden > /inputs/first/a.txt) 2>/dev/null; then exit 1; fi; printf '%s' \"$SECRET_TOKEN\"", "actionEnvironment": {"SECRET_TOKEN": "selected"}, "actionFiles": [
+                {"path": "first/a.txt", "content": STANDARD.encode(b"fixture"), "sha256": artifacts::digest(b"fixture")},
+                {"path": "second/b.txt", "content": STANDARD.encode(b"other"), "sha256": artifacts::digest(b"other")}
+            ]}]
+        })).unwrap();
+        assert!(valid_job(&job, "https://api.co.codes"));
+        let root = tempfile::tempdir().unwrap();
+        let result = execute_step(
+            IMAGE,
+            root.path(),
+            &job.steps[0],
+            &job,
+            &AtomicBool::new(false),
+            Instant::now() + STEP_TIMEOUT,
+            &Logs::default(),
+        );
+        assert_eq!(result.exit_code, 0, "{}", result.output);
+        assert_eq!(result.output, "***");
+    }
+
+    #[test]
+    fn action_environment_does_not_inherit_job_credentials() {
+        let job: Assignment = serde_json::from_value(serde_json::json!({
+            "id": "fixture", "assignmentToken": "lease", "checkoutUrl": "https://git.co.codes/me/repo.git", "commitOid": "a".repeat(40), "vcpus": 1, "ramMiB": 128,
+            "environment": {"JOB_TOKEN": "unrelated"}, "secretValues": ["unrelated", "selected"],
+            "steps": [{"name": "action", "run": "true", "actionEnvironment": {"SECRET_TOKEN": "selected"}}]
+        })).unwrap();
+        assert!(valid_job(&job, "https://api.co.codes"));
+        let file =
+            environment_values_file(job.steps[0].action_environment.as_ref().unwrap()).unwrap();
+        let script = std::fs::read_to_string(file.path()).unwrap();
+        assert!(script.contains("SECRET_TOKEN='selected'"));
+        assert!(!script.contains("JOB_TOKEN"));
+        assert!(!script.contains("unrelated"));
+    }
+
+    #[test]
+    fn action_files_are_verified_and_confined() {
+        let file = |path: &str, digest: &str| ActionFile {
+            path: path.into(),
+            content: STANDARD.encode(b"fixture"),
+            sha256: digest.into(),
+        };
+        let digest = artifacts::digest(b"fixture");
+        let directory =
+            action_input_directory(&[file("first/a.txt", &digest), file("second/b.txt", &digest)])
+                .unwrap();
+        assert_eq!(
+            std::fs::read(directory.path().join("first/a.txt")).unwrap(),
+            b"fixture"
+        );
+        assert!(action_input_directory(&[file("../escape", &digest)]).is_err());
+        assert!(action_input_directory(&[file("safe/file", &"0".repeat(64))]).is_err());
+        assert!(action_input_directory(&[file("same", &digest), file("same", &digest)]).is_err());
+        assert!(action_input_directory(&[file(".git/config", &digest)]).is_err());
+    }
 }
 
 fn execute(
@@ -915,7 +1084,7 @@ mod tests {
             "environment": { "TOKEN": "fixture-sensitive", "REGION": "canada", "MULTILINE": "line one\nline two", "CONTAINERS_CONF": "/co-test-must-not-affect-host" },
             "secretValues": ["fixture-sensitive"]
         })).unwrap();
-        let step = Step { name: "Environment".into(), run: "test \"$REGION\" = canada; test \"$CONTAINERS_CONF\" = /co-test-must-not-affect-host; test \"$MULTILINE\" = \"$(printf 'line one\\nline two')\"; printf '%s' \"$TOKEN\"".into() };
+        let step = Step { name: "Environment".into(), run: "test \"$REGION\" = canada; test \"$CONTAINERS_CONF\" = /co-test-must-not-affect-host; test \"$MULTILINE\" = \"$(printf 'line one\\nline two')\"; printf '%s' \"$TOKEN\"".into(), ..Step::default() };
         let logs = Logs::default();
         let result = execute_step(
             IMAGE,
@@ -1001,7 +1170,7 @@ mod tests {
             machine_id: String::new(),
         };
         let step = Step { name: "Isolation".into(),
-            run: "test -z \"$CO_RUNNER_TEST_SECRET\" && echo result > /workspace/output.txt && cat /workspace/output.txt".into() };
+            run: "test -z \"$CO_RUNNER_TEST_SECRET\" && echo result > /workspace/output.txt && cat /workspace/output.txt".into(), ..Step::default() };
         let result = execute_step(
             IMAGE,
             root.path(),
@@ -1073,7 +1242,7 @@ mod tests {
             assignment_token: "not-visible-inside-container".into(),
             checkout_url: format!("file://{}", source.display()), commit_oid: oid.trim().to_owned(),
             steps: vec![Step { name: "Verify".into(),
-                run: "test \"$(cat payload.txt)\" = 'verified commit' && test -z \"$GIT_CONFIG_VALUE_0\" && echo passed".into() }],
+                run: "test \"$(cat payload.txt)\" = 'verified commit' && test -z \"$GIT_CONFIG_VALUE_0\" && echo passed".into(), ..Step::default() }],
             vcpus: 1, ram_mib: 128, environment: BTreeMap::new(), secret_values: vec![], artifact: None, machine_id: String::new() };
         let machine = MachineIdentity {
             id: "test".into(),

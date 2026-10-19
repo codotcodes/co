@@ -28,7 +28,7 @@ impl Output {
     }
 }
 
-fn valid_path(path: &str) -> bool {
+pub(super) fn valid_path(path: &str) -> bool {
     path.len() <= 1024
         && path.split('/').all(|part| {
             !part.is_empty()
