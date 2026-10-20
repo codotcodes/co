@@ -51,6 +51,14 @@ struct Step {
     name: String,
     run: String,
     #[serde(default)]
+    github: bool,
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    shell: Option<String>,
+    #[serde(default)]
+    workflow_network: Option<String>,
+    #[serde(default)]
     action_environment: Option<BTreeMap<String, String>>,
     #[serde(default)]
     action_files: Vec<ActionFile>,
@@ -223,6 +231,9 @@ fn next_job(machine: &MachineIdentity) -> Result<Option<Assignment>, String> {
     if cfg!(unix) {
         capabilities.push("workflow-artifacts-v1");
         capabilities.push("repository-action-outputs-v1");
+        if github_runtime_available() {
+            capabilities.push("github-actions-v1");
+        }
     }
     if rootless_outbound_available() {
         capabilities.push("repository-actions-outbound-v1");
@@ -252,7 +263,33 @@ fn rootless_outbound_available() -> bool {
             .is_ok_and(|output| output.status.success())
 }
 
+fn github_runtime_available() -> bool {
+    static AVAILABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *AVAILABLE.get_or_init(|| {
+        let image = std::env::var("CO_MACHINE_IMAGE").unwrap_or_else(|_| IMAGE.to_owned());
+        image.contains("@sha256:")
+            && Command::new("podman")
+                .args([
+                    "image",
+                    "inspect",
+                    "--format",
+                    "{{ index .Config.Labels \"io.co.codes.github-actions\" }}",
+                    &image,
+                ])
+                .output()
+                .is_ok_and(|output| {
+                    output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == "1"
+                })
+    })
+}
+
 fn step_network(job: &Assignment, step: &Step) -> Option<&'static str> {
+    if let Some(network) = step.workflow_network.as_deref() {
+        return (network == "outbound"
+            && step.github
+            && matches!(job.scope.as_str(), "public" | "owner"))
+        .then_some("slirp4netns:allow_host_loopback=false");
+    }
     match step.action_network.as_deref() {
         None => Some("none"),
         Some("outbound")
@@ -367,6 +404,22 @@ fn valid_job(job: &Assignment, api_url: &str) -> bool {
         && job.steps.len() <= 20
         && valid_environment(job)
         && job.steps.iter().all(|step| {
+            if step.run.len() > 65_536
+                || step.run.contains('\0')
+                || step
+                    .shell
+                    .as_deref()
+                    .is_some_and(|shell| !matches!(shell, "sh" | "bash"))
+                || step.id.as_ref().is_some_and(|id| {
+                    id.is_empty()
+                        || id.len() > 64
+                        || !id
+                            .bytes()
+                            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+                })
+            {
+                return false;
+            }
             if step.action_outputs.as_ref().is_some_and(|keys| {
                 !cfg!(unix)
                     || step.action_environment.is_none()
@@ -531,8 +584,9 @@ fn execute_step(
     job: &Assignment,
     cancelled: &AtomicBool,
     deadline: Instant,
-    logs: &Logs,
+    context: (&Logs, Option<&Path>),
 ) -> StepResult {
+    let (logs, runtime) = context;
     let index = logs.lock().unwrap().len();
     live_logs::begin(logs, &step.name);
     let network = step_network(job, step)
@@ -628,15 +682,65 @@ fn execute_step(
         directory.display(),
         "/workspace"
     ));
-    command.args([
-        image,
-        "/bin/sh",
-        "-e",
-        "-c",
-        if output_directory.is_some() { ". /run/co-environment.sh\nexport CO_ACTION_OUTPUT=/run/co-action-output/outputs.json\nexec /bin/sh -e -c \"$1\"" } else { ". /run/co-environment.sh\nexec /bin/sh -e -c \"$1\"" },
-        "co-step",
-        &step.run,
-    ]);
+    let mut runtime_files = None;
+    if step.github {
+        let prepared = (|| -> Result<_, std::io::Error> {
+            let root = runtime.ok_or_else(|| std::io::Error::other("missing job runtime"))?;
+            let mut script = tempfile::NamedTempFile::new()?;
+            script.write_all(include_bytes!("command_files.mjs"))?;
+            let mut payload = tempfile::NamedTempFile::new()?;
+            serde_json::to_writer(
+                &mut payload,
+                &serde_json::json!({
+                    "command": step.run, "shell": step.shell.as_deref().unwrap_or("bash"),
+                "id": step.id, "outputKeys": step.action_outputs, "env": {"GITHUB_SHA": job.commit_oid}
+                }),
+            )?;
+            command.arg(format!("--volume={}:/run/co-job:rw,Z", root.display()));
+            command.arg(format!(
+                "--volume={}:/run/command_files.mjs:ro,Z",
+                script.path().display()
+            ));
+            command.arg(format!(
+                "--volume={}:/run/co-step.json:ro,Z",
+                payload.path().display()
+            ));
+            let mut action = tempfile::NamedTempFile::new()?;
+            action.write_all(include_bytes!("action_runtime.mjs"))?;
+            command.arg(format!(
+                "--volume={}:/run/co-action.mjs:ro,Z",
+                action.path().display()
+            ));
+            Ok((script, payload, action))
+        })();
+        match prepared {
+            Ok(files) => runtime_files = Some(files),
+            Err(_) => {
+                let message = "Unable to prepare the GitHub-compatible job runtime.";
+                live_logs::append(logs, index, message);
+                logs.lock().unwrap()[index].exit_code = Some(1);
+                return StepResult {
+                    name: step.name.clone(),
+                    exit_code: 1,
+                    output: message.into(),
+                    outputs: None,
+                };
+            }
+        }
+    }
+    let script = if step.github {
+        if output_directory.is_some() {
+            ". /run/co-environment.sh\nexport CO_ACTION_OUTPUT=/run/co-action-output/outputs.json\nexec /usr/local/bin/node /run/command_files.mjs /run/co-step.json"
+        } else {
+            ". /run/co-environment.sh\nexec /usr/local/bin/node /run/command_files.mjs /run/co-step.json"
+        }
+    } else if output_directory.is_some() {
+        ". /run/co-environment.sh\nexport CO_ACTION_OUTPUT=/run/co-action-output/outputs.json\nexec /bin/sh -e -c \"$1\""
+    } else {
+        ". /run/co-environment.sh\nexec /bin/sh -e -c \"$1\""
+    };
+    command.args([image, "/bin/sh", "-e", "-c", script, "co-step", &step.run]);
+    let _runtime_files = runtime_files;
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = match command.spawn() {
         Ok(child) => child,
@@ -787,7 +891,7 @@ mod action_tests {
                 &job,
                 &AtomicBool::new(false),
                 Instant::now() + STEP_TIMEOUT,
-                &Logs::default(),
+                (&Logs::default(), None),
             );
             assert_eq!(result.exit_code, 0, "{}", result.output);
             assert_eq!(
@@ -807,7 +911,7 @@ mod action_tests {
             &job,
             &AtomicBool::new(false),
             Instant::now() + STEP_TIMEOUT,
-            &Logs::default(),
+            (&Logs::default(), None),
         );
         assert_eq!(result.exit_code, 0);
         assert!(result.outputs.is_none());
@@ -870,7 +974,7 @@ mod action_tests {
                 &job,
                 &AtomicBool::new(false),
                 Instant::now() + STEP_TIMEOUT,
-                &Logs::default(),
+                (&Logs::default(), None),
             );
             assert_eq!(result.exit_code, 0, "{}", result.output);
         }
@@ -896,7 +1000,7 @@ mod action_tests {
             &job,
             &AtomicBool::new(false),
             Instant::now() + STEP_TIMEOUT,
-            &Logs::default(),
+            (&Logs::default(), None),
         );
         assert_eq!(result.exit_code, 0, "{}", result.output);
         assert_eq!(result.output, "***");
@@ -1007,6 +1111,8 @@ fn execute(
             return Err("CO_MACHINE_IMAGE must be pinned by digest".into());
         }
         let mut steps = Vec::new();
+        let runtime = tempfile::tempdir()
+            .map_err(|error| format!("unable to create job runtime: {error}"))?;
         let mut output_bytes = 0;
         for step in &job.steps {
             if cancelled.load(Ordering::Relaxed) || Instant::now() >= deadline {
@@ -1019,7 +1125,7 @@ fn execute(
                 job,
                 &cancelled,
                 deadline,
-                &logs,
+                (&logs, Some(runtime.path())),
             );
             if let Some(outputs) = &result.outputs {
                 let size = action_outputs::size(outputs);
@@ -1301,7 +1407,7 @@ mod tests {
             &job,
             &AtomicBool::new(false),
             Instant::now() + STEP_TIMEOUT,
-            &logs,
+            (&logs, None),
         );
         assert_eq!(result.exit_code, 0);
         assert_eq!(result.output, "***");
@@ -1389,7 +1495,7 @@ mod tests {
             &job,
             &AtomicBool::new(false),
             Instant::now() + STEP_TIMEOUT,
-            &Logs::default(),
+            (&Logs::default(), None),
         );
         assert_eq!(result.exit_code, 0, "{}", result.output);
         assert_eq!(
@@ -1768,5 +1874,68 @@ mod tests {
             handle.join().unwrap();
         }
         server.join().unwrap();
+    }
+}
+#[cfg(test)]
+mod github_tests {
+    use super::*;
+
+    #[test]
+    #[ignore = "requires the prepared Node runner image in CO_TEST_TOOL_IMAGE"]
+    fn github_runtime_keeps_job_state_without_exposing_host_credentials() {
+        let image = std::env::var("CO_TEST_TOOL_IMAGE").expect("CO_TEST_TOOL_IMAGE");
+        let job: Assignment = serde_json::from_value(serde_json::json!({
+            "id": "github-runtime-fixture", "assignmentToken": "never-in-container",
+            "checkoutUrl": "https://git.co.codes/me/repo.git", "commitOid": "a".repeat(40),
+            "scope": "public", "vcpus": 1, "ramMiB": 512, "steps": []
+        }))
+        .unwrap();
+        let checkout = tempfile::tempdir().unwrap();
+        let runtime = tempfile::tempdir().unwrap();
+        for (index, run) in [
+            "mkdir -p \"$RUNNER_TOOL_CACHE/custom\"; printf '#!/bin/sh\\necho installed\\n' > \"$RUNNER_TOOL_CACHE/custom/demo\"; chmod +x \"$RUNNER_TOOL_CACHE/custom/demo\"; printf '%s\\n' \"$RUNNER_TOOL_CACHE/custom\" >> \"$GITHUB_PATH\"; echo RESULT=ready >> \"$GITHUB_ENV\"; echo version=42 >> \"$GITHUB_OUTPUT\"",
+            "test \"$RESULT\" = ready; test \"$(demo)\" = installed; test '${{ steps.setup.outputs.version }}' = 42; test -z \"${CO_RUNNER_TEST_SECRET:-}\"; test ! -e /run/co-environment-host; test \"$GITHUB_SHA\" = aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa; test ! -w /usr/local/bin",
+        ].iter().enumerate() {
+            let step = Step { name: format!("step-{index}"), run: (*run).into(), github: true, id: Some(if index == 0 { "setup" } else { "check" }.into()), ..Step::default() };
+            let result = execute_step(&image, checkout.path(), &step, &job, &AtomicBool::new(false), Instant::now() + STEP_TIMEOUT, (&Logs::default(), Some(runtime.path())));
+            assert_eq!(result.exit_code, 0, "{}", result.output);
+    }
+    }
+
+    #[test]
+    #[ignore = "requires prepared image, rootless outbound networking and public release downloads"]
+    fn github_setup_tools_and_public_javascript_action_execute() {
+        let image = std::env::var("CO_TEST_TOOL_IMAGE").expect("CO_TEST_TOOL_IMAGE");
+        assert!(rootless_outbound_available());
+        let job: Assignment = serde_json::from_value(serde_json::json!({
+            "id": "github-tools-fixture", "assignmentToken": "never-in-container",
+            "checkoutUrl": "https://git.co.codes/me/repo.git", "commitOid": "a".repeat(40),
+            "scope": "public", "vcpus": 2, "ramMiB": 1024, "steps": []
+        }))
+        .unwrap();
+        let checkout = tempfile::tempdir().unwrap();
+        let runtime = tempfile::tempdir().unwrap();
+        for (index, plan) in [
+            serde_json::json!({"adapter":"oven-sh/setup-bun", "inputs":{"bun-version":"1.3.13"}}),
+            serde_json::json!({"adapter":"actions/setup-node", "inputs":{"node-version":"22"}}),
+            serde_json::json!({"adapter":"opentofu/setup-opentofu", "inputs":{"tofu_version":"1.12.5"}}),
+            serde_json::json!({"repository":"actions/hello-world-javascript-action", "commit":"79ac0da13ee392da3fdd151813d5ce4658cb7e27", "path":"", "inputs":{"who-to-greet":"co.codes"}, "runs":{"using":"node24","main":"dist/index.js"}}),
+        ].iter().enumerate() {
+            let encoded = STANDARD.encode(serde_json::to_vec(plan).unwrap());
+            let step = Step { name: format!("action-{index}"), run: format!("node /run/co-action.mjs '{encoded}'"), github: true, id: Some(format!("action_{index}")), workflow_network: Some("outbound".into()), ..Step::default() };
+            let result = execute_step(&image, checkout.path(), &step, &job, &AtomicBool::new(false), Instant::now() + STEP_TIMEOUT, (&Logs::default(), Some(runtime.path())));
+            assert_eq!(result.exit_code, 0, "{}", result.output);
+        }
+        let step = Step { name: "Verify tools offline".into(), run: "test \"$(bun --version)\" = 1.3.13; node --version | grep '^v22\\.'; tofu version | grep 'OpenTofu v1.12.5'; test -n '${{ steps.action_3.outputs.time }}'".into(), github: true, ..Step::default() };
+        let result = execute_step(
+            &image,
+            checkout.path(),
+            &step,
+            &job,
+            &AtomicBool::new(false),
+            Instant::now() + STEP_TIMEOUT,
+            (&Logs::default(), Some(runtime.path())),
+        );
+        assert_eq!(result.exit_code, 0, "{}", result.output);
     }
 }

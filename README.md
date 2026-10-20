@@ -65,6 +65,28 @@ Public and owner-scoped runners support the same job types. An action declaring 
 
 Unix runners support `artifact: { name: "site", path: "dist" }` on a job. After all steps succeed, the harness uploads that directory through its live assignment, without enabling container networking. Outputs must contain only regular files: symbolic links, hard links, special files, traversal paths and empty artifacts are rejected. Limits are 4096 files, 8192 inspected entries and 32 MiB per bundle. Artifact-producing jobs cannot reference secrets. The controller must have private artifact storage configured; unsupported runners or missing storage fail closed. The server binds verified bytes to the exact job and commit and requires the receipt before accepting success. This is a build handoff, not deployment support.
 
+### GitHub-compatible jobs
+
+Current controllers can assign GitHub-compatible shell, JavaScript and composite
+steps. Provision the platform's `deploy/runner/Containerfile` image and pin its
+manifest digest in `CO_MACHINE_IMAGE`. The image label
+`io.co.codes.github-actions=1` enables the `github-actions-v1` capability; the
+minimal Alpine fallback does not advertise it. Outbound jobs also require
+rootless Podman and `slirp4netns` (D156).
+
+Compatible jobs have isolated writable HOME, tool-cache and command-file mounts.
+`GITHUB_ENV`, `GITHUB_PATH` and `GITHUB_OUTPUT` persist bounded state between
+compatible steps, never between jobs. Node/Bun/OpenTofu setup downloads verify
+release checksums and install into that job's tool cache. Ordinary native jobs
+keep their existing offline behavior. Public GitHub action refs resolve to exact
+commits on the controller; the runner downloads and executes their code only
+inside its container. No GitHub token or host credentials are provided.
+
+The platform migration guide records unsupported action hooks, nested composites,
+Docker actions, expressions and GitHub service APIs. An unavailable feature must
+fail rather than be treated as successful. Existing controller secret, retry,
+resource, log and lease rules continue to apply.
+
 ### Native deployments
 
 `co deployment configure OWNER/REPO ENV --file POLICY.json` creates or updates an owner-managed deployment environment. The policy names the protected branch, required native jobs, build artifact and Cloudflare Worker target. `co deployment set-secret OWNER/REPO NAME --environment ENV` reads a write-only deployment secret from an echo-disabled prompt, standard input, or `--value-file PATH`. Omit `--environment` for a repository-scoped deployment secret. These secrets are separate from ordinary workflow secrets and are never passed to build jobs.

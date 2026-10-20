@@ -14,7 +14,7 @@ pub(super) fn valid_keys(keys: &[String]) -> bool {
                 && !["constructor", "prototype"].contains(&key.as_str())
                 && key.bytes().enumerate().all(|(index, byte)| {
                     byte.is_ascii_lowercase()
-                        || index > 0 && (byte.is_ascii_digit() || byte == b'_')
+                        || index > 0 && (byte.is_ascii_digit() || byte == b'_' || byte == b'-')
                 })
                 && !key.is_empty()
         })

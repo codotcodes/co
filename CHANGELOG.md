@@ -4,6 +4,8 @@ All notable changes are documented here. This project follows semantic versionin
 
 ## [Unreleased]
 
+- Run compatible GitHub actions with job-local tool setup, environment changes, outputs and log masking.
+
 ## [0.12.0] - 2026-10-20
 
 - Support explicitly networked actions on public runners as well as owner-scoped runners, while keeping ordinary steps isolated.
