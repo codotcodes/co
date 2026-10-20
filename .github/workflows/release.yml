@@ -68,7 +68,7 @@ jobs:
           else
             (cd dist && shasum -a 256 "$asset" > "$asset.sha256")
           fi
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@v7
         if: matrix.musl
         with:
           go-version: stable
@@ -106,7 +106,7 @@ jobs:
           name: co-${{ matrix.target }}
           path: dist
       - run: cd dist && sha256sum -c ./*.sha256
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@v7
         with:
           go-version: stable
       - run: go install github.com/goreleaser/nfpm/v2/cmd/nfpm@v2.47.0
