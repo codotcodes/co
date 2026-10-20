@@ -4,6 +4,8 @@ All notable changes are documented here. This project follows semantic versionin
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-10-20
+
 - Support explicitly networked actions on public runners as well as owner-scoped runners, while keeping ordinary steps isolated.
 
 ## [0.11.0] - 2026-10-19
@@ -79,7 +81,8 @@ All notable changes are documented here. This project follows semantic versionin
 - Validate repository access in `clone` while smart HTTP remains unavailable.
 - Add Linux and macOS release packaging, Nix support, and the global installer.
 
-[Unreleased]: https://github.com/codotcodes/co/compare/v0.11.0...HEAD
+[Unreleased]: https://github.com/codotcodes/co/compare/v0.12.0...HEAD
+[0.12.0]: https://github.com/codotcodes/co/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/codotcodes/co/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/codotcodes/co/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/codotcodes/co/compare/v0.8.0...v0.9.0
