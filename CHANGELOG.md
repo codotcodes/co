@@ -4,6 +4,8 @@ All notable changes are documented here. This project follows semantic versionin
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-10-20
+
 - Run compatible GitHub actions with job-local tool setup, environment changes, outputs and log masking.
 - Restore repository-scoped build caches and save new entries only after successful trusted runs.
 
