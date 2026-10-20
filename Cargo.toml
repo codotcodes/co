@@ -21,7 +21,7 @@ path = "tests/workflow.rs"
 harness = false
 
 [dependencies]
-base64 = "0.22"
+base64 = "0.23"
 fs2 = "0.4"
 httpdate = "1"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
