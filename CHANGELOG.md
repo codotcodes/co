@@ -4,6 +4,8 @@ All notable changes are documented here. This project follows semantic versionin
 
 ## [Unreleased]
 
+- Support explicitly networked actions on public runners as well as owner-scoped runners, while keeping ordinary steps isolated.
+
 ## [0.11.0] - 2026-10-19
 
 - Run repository actions with only their selected secrets and verified artifact inputs.

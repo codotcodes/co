@@ -224,7 +224,7 @@ fn next_job(machine: &MachineIdentity) -> Result<Option<Assignment>, String> {
         capabilities.push("workflow-artifacts-v1");
         capabilities.push("repository-action-outputs-v1");
     }
-    if machine.scope == "owner" && rootless_outbound_available() {
+    if rootless_outbound_available() {
         capabilities.push("repository-actions-outbound-v1");
     }
     let response = post(
@@ -236,15 +236,6 @@ fn next_job(machine: &MachineIdentity) -> Result<Option<Assignment>, String> {
         return Ok(None);
     }
     let job: NextJob = decode(response)?;
-    if machine.scope != "owner"
-        && job
-            .job
-            .steps
-            .iter()
-            .any(|step| step.action_network.is_some())
-    {
-        return Err("outbound actions require an owner-scoped runner".into());
-    }
     Ok(Some(job.job))
 }
 
@@ -264,7 +255,10 @@ fn rootless_outbound_available() -> bool {
 fn step_network(job: &Assignment, step: &Step) -> Option<&'static str> {
     match step.action_network.as_deref() {
         None => Some("none"),
-        Some("outbound") if job.scope == "owner" && step.action_environment.is_some() => {
+        Some("outbound")
+            if step.action_environment.is_some()
+                && matches!(job.scope.as_str(), "public" | "owner") =>
+        {
             Some("slirp4netns:allow_host_loopback=false")
         }
         _ => None,
@@ -544,7 +538,8 @@ fn execute_step(
     let network = step_network(job, step)
         .filter(|network| *network == "none" || rootless_outbound_available());
     let Some(network) = network else {
-        let message = "Outbound actions require rootless networking on an owner-scoped runner.";
+        let message =
+            "Outbound actions require rootless networking and an explicit action environment.";
         live_logs::append(logs, index, message);
         logs.lock().unwrap()[index].exit_code = Some(1);
         return StepResult {
@@ -819,7 +814,7 @@ mod action_tests {
     }
 
     #[test]
-    fn networking_requires_an_explicit_owner_action() {
+    fn networking_requires_an_explicit_action_in_either_scope() {
         let mut job: Assignment = serde_json::from_value(serde_json::json!({
             "id": "network", "assignmentToken": "lease", "checkoutUrl": "https://git.co.codes/me/repo.git", "commitOid": "a".repeat(40), "vcpus": 1, "ramMiB": 128, "scope": "owner", "steps": []
         })).unwrap();
@@ -837,7 +832,10 @@ mod action_tests {
             Some("slirp4netns:allow_host_loopback=false")
         );
         job.scope = "public".into();
-        assert_eq!(step_network(&job, &step), None);
+        assert_eq!(
+            step_network(&job, &step),
+            Some("slirp4netns:allow_host_loopback=false")
+        );
         step.action_network = Some("host".into());
         assert_eq!(step_network(&job, &step), None);
         step.action_network = None;
@@ -846,10 +844,10 @@ mod action_tests {
 
     #[test]
     #[ignore = "requires rootless Podman, slirp4netns and the pinned Alpine image"]
-    fn outbound_owner_action_does_not_enable_networking_for_other_steps() {
+    fn outbound_public_action_does_not_enable_networking_for_other_steps() {
         assert!(rootless_outbound_available());
         let job: Assignment = serde_json::from_value(serde_json::json!({
-            "id": "outbound-fixture", "assignmentToken": "lease", "checkoutUrl": "https://git.co.codes/me/repo.git", "commitOid": "a".repeat(40), "vcpus": 1, "ramMiB": 128, "scope": "owner", "steps": []
+            "id": "outbound-fixture", "assignmentToken": "lease", "checkoutUrl": "https://git.co.codes/me/repo.git", "commitOid": "a".repeat(40), "vcpus": 1, "ramMiB": 128, "scope": "public", "steps": []
         })).unwrap();
         let root = tempfile::tempdir().unwrap();
         let outbound = Step {
