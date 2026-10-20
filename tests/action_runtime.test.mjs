@@ -9,6 +9,7 @@ import {
   extractTar,
   expand,
   selectNode,
+  validToolVersion,
 } from "../src/machine/action_runtime.mjs";
 
 function archive(name, type = "0", value = "fixture") {
@@ -61,6 +62,24 @@ test("composite interpolation has an explicit context allowlist", () => {
     "1 test",
   );
   assert.throws(() => expand("${{ secrets.TOKEN }}", {}));
+});
+
+test("tool versions cannot select arbitrary download paths", () => {
+  for (const tool of ["node", "bun", "tofu"]) {
+    for (const value of [
+      "../../releases/latest",
+      "1.2.3/../latest",
+      "1;echo",
+      "",
+      "https://example.test",
+    ])
+      assert.equal(validToolVersion(tool, value), false);
+    assert.equal(validToolVersion(tool, "latest"), true);
+    assert.equal(validToolVersion(tool, "1.2.3"), true);
+  }
+  assert.equal(validToolVersion("node", "lts/*"), true);
+  assert.equal(validToolVersion("node", "24"), true);
+  assert.equal(validToolVersion("bun", "24"), false);
 });
 
 test("composite steps carry environment and map declared outputs", () => {

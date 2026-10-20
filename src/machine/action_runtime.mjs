@@ -137,8 +137,20 @@ export function selectNode(releases, requested) {
   return found.version.slice(1);
 }
 
+export function validToolVersion(tool, requested) {
+  if (typeof requested !== "string" || requested.length > 64) return false;
+  if (tool === "node")
+    return /^(?:v?\d+(?:\.\d+){0,2}|latest|node|lts\/(?:\*|[A-Za-z]+))$/.test(
+      requested,
+    );
+  return (
+    requested === "latest" ||
+    /^v?\d+\.\d+\.\d+(?:-[A-Za-z0-9.]+)?$/.test(requested)
+  );
+}
+
 async function installTool(tool, requested, publish = true) {
-  if (!/^[A-Za-z0-9.*_/-]+$/.test(requested) || requested.length > 64)
+  if (!validToolVersion(tool, requested))
     throw new Error("Invalid tool version");
   const root = process.env.RUNNER_TOOL_CACHE;
   if (!root) throw new Error("Missing job-local tool cache");
