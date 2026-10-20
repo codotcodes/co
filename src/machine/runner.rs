@@ -1,6 +1,7 @@
 use super::MachineIdentity;
 use super::action_outputs;
 use super::artifacts;
+use super::cache;
 use super::live_logs::{self, Logs};
 use crate::{client, decode, network_error};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -43,6 +44,10 @@ struct Assignment {
     secret_values: Vec<String>,
     #[serde(default)]
     artifact: Option<artifacts::Output>,
+    #[serde(default)]
+    cache_write: bool,
+    #[serde(default)]
+    repository_id: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -52,6 +57,8 @@ struct Step {
     run: String,
     #[serde(default)]
     github: bool,
+    #[serde(default)]
+    cache: bool,
     #[serde(default)]
     id: Option<String>,
     #[serde(default)]
@@ -144,9 +151,15 @@ impl Runner {
         let halt = self.halt.clone();
         let handle = thread::spawn(move || {
             eprintln!("Running job {} on machine {}", job.id, machine.id);
-            let (results, success) = execute(&machine, &job, requested_at, halt);
+            let (results, success, cache) = execute(&machine, &job, requested_at, halt);
             if let Err(message) = finish(&machine, &job, results, success) {
                 eprintln!("Job {}: {message}", job.id);
+            } else if success {
+                for entry in cache {
+                    if entry.publish().is_err() {
+                        eprintln!("Job {}: cache save skipped", job.id);
+                    }
+                }
             }
         });
         self.active.push((cpus, handle));
@@ -233,6 +246,7 @@ fn next_job(machine: &MachineIdentity) -> Result<Option<Assignment>, String> {
         capabilities.push("repository-action-outputs-v1");
         if github_runtime_available() {
             capabilities.push("github-actions-v1");
+            capabilities.push("workflow-cache-v1");
         }
     }
     if rootless_outbound_available() {
@@ -404,7 +418,8 @@ fn valid_job(job: &Assignment, api_url: &str) -> bool {
         && job.steps.len() <= 20
         && valid_environment(job)
         && job.steps.iter().all(|step| {
-            if step.run.len() > 65_536
+            if (step.cache && !step.github)
+                || step.run.len() > 65_536
                 || step.run.contains('\0')
                 || step
                     .shell
@@ -584,9 +599,9 @@ fn execute_step(
     job: &Assignment,
     cancelled: &AtomicBool,
     deadline: Instant,
-    context: (&Logs, Option<&Path>),
+    context: (&Logs, Option<&Path>, Option<&Path>),
 ) -> StepResult {
-    let (logs, runtime) = context;
+    let (logs, runtime, cache) = context;
     let index = logs.lock().unwrap().len();
     live_logs::begin(logs, &step.name);
     let network = step_network(job, step)
@@ -684,6 +699,9 @@ fn execute_step(
     ));
     let mut runtime_files = None;
     if step.github {
+        if let Some(path) = cache {
+            command.arg(format!("--volume={}:/run/co-cache:ro,z", path.display()));
+        }
         let prepared = (|| -> Result<_, std::io::Error> {
             let root = runtime.ok_or_else(|| std::io::Error::other("missing job runtime"))?;
             let mut script = tempfile::NamedTempFile::new()?;
@@ -707,11 +725,17 @@ fn execute_step(
             ));
             let mut action = tempfile::NamedTempFile::new()?;
             action.write_all(include_bytes!("action_runtime.mjs"))?;
+            let mut cache_runtime = tempfile::NamedTempFile::new()?;
+            cache_runtime.write_all(include_bytes!("cache_runtime.mjs"))?;
+            command.arg(format!(
+                "--volume={}:/run/cache_runtime.mjs:ro,Z",
+                cache_runtime.path().display()
+            ));
             command.arg(format!(
                 "--volume={}:/run/co-action.mjs:ro,Z",
                 action.path().display()
             ));
-            Ok((script, payload, action))
+            Ok((script, payload, action, cache_runtime))
         })();
         match prepared {
             Ok(files) => runtime_files = Some(files),
@@ -891,7 +915,7 @@ mod action_tests {
                 &job,
                 &AtomicBool::new(false),
                 Instant::now() + STEP_TIMEOUT,
-                (&Logs::default(), None),
+                (&Logs::default(), None, None),
             );
             assert_eq!(result.exit_code, 0, "{}", result.output);
             assert_eq!(
@@ -911,7 +935,7 @@ mod action_tests {
             &job,
             &AtomicBool::new(false),
             Instant::now() + STEP_TIMEOUT,
-            (&Logs::default(), None),
+            (&Logs::default(), None, None),
         );
         assert_eq!(result.exit_code, 0);
         assert!(result.outputs.is_none());
@@ -974,7 +998,7 @@ mod action_tests {
                 &job,
                 &AtomicBool::new(false),
                 Instant::now() + STEP_TIMEOUT,
-                (&Logs::default(), None),
+                (&Logs::default(), None, None),
             );
             assert_eq!(result.exit_code, 0, "{}", result.output);
         }
@@ -1000,7 +1024,7 @@ mod action_tests {
             &job,
             &AtomicBool::new(false),
             Instant::now() + STEP_TIMEOUT,
-            (&Logs::default(), None),
+            (&Logs::default(), None, None),
         );
         assert_eq!(result.exit_code, 0, "{}", result.output);
         assert_eq!(result.output, "***");
@@ -1049,7 +1073,7 @@ fn execute(
     job: &Assignment,
     requested_at: Instant,
     halt: Arc<AtomicBool>,
-) -> (Vec<StepResult>, bool) {
+) -> (Vec<StepResult>, bool, Vec<cache::Publication>) {
     let logs = Logs::default();
     let upload_stop = Arc::new(AtomicBool::new(false));
     let uploader = live_logs::upload(
@@ -1113,6 +1137,32 @@ fn execute(
         let mut steps = Vec::new();
         let runtime = tempfile::tempdir()
             .map_err(|error| format!("unable to create job runtime: {error}"))?;
+        let cache = if job.secret_values.is_empty()
+            && job.repository_id.as_ref().is_some_and(|id| !id.is_empty())
+            && job.steps.iter().any(|step| step.cache)
+        {
+            std::env::var_os("CO_MACHINE_CACHE_DIR")
+                .map(std::path::PathBuf::from)
+                .or_else(|| {
+                    crate::config_path()
+                        .ok()
+                        .map(|path| path.with_file_name("runner-cache"))
+                })
+                .and_then(|path| {
+                    cache::Store::open(
+                        path,
+                        &format!(
+                            "{}\0{}",
+                            job.checkout_url,
+                            job.repository_id.as_deref().unwrap_or_default()
+                        ),
+                        &image,
+                    )
+                    .ok()
+                })
+        } else {
+            None
+        };
         let mut output_bytes = 0;
         for step in &job.steps {
             if cancelled.load(Ordering::Relaxed) || Instant::now() >= deadline {
@@ -1125,7 +1175,11 @@ fn execute(
                 job,
                 &cancelled,
                 deadline,
-                (&logs, Some(runtime.path())),
+                (
+                    &logs,
+                    Some(runtime.path()),
+                    cache.as_ref().map(|cache| cache.path()),
+                ),
             );
             if let Some(outputs) = &result.outputs {
                 let size = action_outputs::size(outputs);
@@ -1164,7 +1218,22 @@ fn execute(
                 }
             }
         }
-        Ok::<_, String>(steps)
+        let publications = if job.cache_write
+            && steps.len() == job.steps.len()
+            && steps.iter().all(|step| step.exit_code == 0)
+            && !cancelled.load(Ordering::Relaxed)
+        {
+            cache
+                .and_then(|cache| {
+                    cache
+                        .collect(&root.path().join("source"), runtime.path())
+                        .ok()
+                })
+                .unwrap_or_default()
+        } else {
+            vec![]
+        };
+        Ok::<_, String>((steps, publications))
     })();
     upload_stop.store(true, Ordering::Relaxed);
     uploader.thread().unpark();
@@ -1176,11 +1245,11 @@ fn execute(
     // delay completion. Its stop flag prevents further requests after wake-up.
     drop(renewer);
     match result {
-        Ok(steps) => {
+        Ok((steps, cache)) => {
             let success = !cancelled.load(Ordering::Relaxed)
                 && steps.len() == job.steps.len()
                 && steps.iter().all(|step| step.exit_code == 0);
-            (steps, success)
+            (steps, success, cache)
         }
         Err(message) => (
             vec![StepResult {
@@ -1190,6 +1259,7 @@ fn execute(
                 outputs: None,
             }],
             false,
+            vec![],
         ),
     }
 }
@@ -1407,7 +1477,7 @@ mod tests {
             &job,
             &AtomicBool::new(false),
             Instant::now() + STEP_TIMEOUT,
-            (&logs, None),
+            (&logs, None, None),
         );
         assert_eq!(result.exit_code, 0);
         assert_eq!(result.output, "***");
@@ -1428,6 +1498,8 @@ mod tests {
             environment: BTreeMap::new(),
             secret_values: vec![],
             artifact: None,
+            cache_write: false,
+            repository_id: None,
             machine_id: String::new(),
         };
         assert!(valid_job(&job, "https://api.co.codes"));
@@ -1451,6 +1523,8 @@ mod tests {
             environment: BTreeMap::new(),
             secret_values: vec![],
             artifact: None,
+            cache_write: false,
+            repository_id: None,
             machine_id: String::new(),
         };
         assert!(valid_job(&local, "https://api.co.localhost"));
@@ -1484,6 +1558,8 @@ mod tests {
             environment: BTreeMap::new(),
             secret_values: vec![],
             artifact: None,
+            cache_write: false,
+            repository_id: None,
             machine_id: String::new(),
         };
         let step = Step { name: "Isolation".into(),
@@ -1495,7 +1571,7 @@ mod tests {
             &job,
             &AtomicBool::new(false),
             Instant::now() + STEP_TIMEOUT,
-            (&Logs::default(), None),
+            (&Logs::default(), None, None),
         );
         assert_eq!(result.exit_code, 0, "{}", result.output);
         assert_eq!(
@@ -1560,14 +1636,14 @@ mod tests {
             checkout_url: format!("file://{}", source.display()), commit_oid: oid.trim().to_owned(), scope: "owner".into(),
             steps: vec![Step { name: "Verify".into(),
                 run: "test \"$(cat payload.txt)\" = 'verified commit' && test -z \"$GIT_CONFIG_VALUE_0\" && echo passed".into(), ..Step::default() }],
-            vcpus: 1, ram_mib: 128, environment: BTreeMap::new(), secret_values: vec![], artifact: None, machine_id: String::new() };
+            vcpus: 1, ram_mib: 128, environment: BTreeMap::new(), secret_values: vec![], artifact: None, cache_write: false, repository_id: None, machine_id: String::new() };
         let machine = MachineIdentity {
             id: "test".into(),
             scope: "owner".into(),
             api_url: "http://127.0.0.1:1".into(),
             credential: "unused".into(),
         };
-        let (steps, passed) = execute(
+        let (steps, passed, _) = execute(
             &machine,
             &job,
             Instant::now(),
@@ -1718,7 +1794,7 @@ mod tests {
                 api_url,
                 credential: "co_runner_test".into(),
             };
-            let (steps, success) = execute(
+            let (steps, success, _) = execute(
                 &machine,
                 &job,
                 Instant::now(),
@@ -1882,6 +1958,85 @@ mod github_tests {
 
     #[test]
     #[ignore = "requires the prepared Node runner image in CO_TEST_TOOL_IMAGE"]
+    fn cache_restores_across_jobs_without_a_shared_writable_mount() {
+        let image = std::env::var("CO_TEST_TOOL_IMAGE").expect("CO_TEST_TOOL_IMAGE");
+        let job: Assignment = serde_json::from_value(serde_json::json!({
+            "id":"cache-fixture", "assignmentToken":"lease", "checkoutUrl":"https://git.co.codes/owner/repo.git", "commitOid":"a".repeat(40), "scope":"public", "vcpus":1, "ramMiB":512, "steps":[]
+        })).unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let store = cache::Store::open(root.path().into(), &job.checkout_url, &image).unwrap();
+        let first = tempfile::tempdir().unwrap();
+        let runtime = tempfile::tempdir().unwrap();
+        let plan = STANDARD.encode(serde_json::to_vec(&serde_json::json!({"adapter":"actions/cache","inputs":{"path":".cache/dependencies","key":"fixture-v1"}})).unwrap());
+        let cache_step = Step {
+            name: "Cache".into(),
+            id: Some("cache".into()),
+            run: format!("node /run/co-action.mjs '{plan}'"),
+            github: true,
+            cache: true,
+            ..Step::default()
+        };
+        let run = |checkout: &Path, runtime: &Path, store: &cache::Store, step: &Step| {
+            execute_step(
+                &image,
+                checkout,
+                step,
+                &job,
+                &AtomicBool::new(false),
+                Instant::now() + STEP_TIMEOUT,
+                (&Logs::default(), Some(runtime), Some(store.path())),
+            )
+        };
+        let result = run(first.path(), runtime.path(), &store, &cache_step);
+        assert_eq!(result.exit_code, 0, "{}", result.output);
+        let build = Step { name:"Build".into(), run:"mkdir -p .cache/dependencies; echo cached > .cache/dependencies/file; test ! -w /run/co-cache".into(), github:true, ..Step::default() };
+        assert_eq!(
+            run(first.path(), runtime.path(), &store, &build).exit_code,
+            0
+        );
+        let entries = store.collect(first.path(), runtime.path()).unwrap();
+        assert_eq!(entries.len(), 1);
+        // This fixture stands in for accepted successful completion; production
+        // calls publish only after finish() succeeds.
+        for entry in entries {
+            entry.publish().unwrap();
+        }
+        let second = tempfile::tempdir().unwrap();
+        let second_runtime = tempfile::tempdir().unwrap();
+        let result = run(second.path(), second_runtime.path(), &store, &cache_step);
+        assert_eq!(result.exit_code, 0, "{}", result.output);
+        assert_eq!(
+            std::fs::read_to_string(second.path().join(".cache/dependencies/file")).unwrap(),
+            "cached\n"
+        );
+        let check = Step {
+            name: "Check".into(),
+            run: "test '${{ steps.cache.outputs.cache-hit }}' = true; test ! -w /run/co-cache"
+                .into(),
+            github: true,
+            ..Step::default()
+        };
+        assert_eq!(
+            run(second.path(), second_runtime.path(), &store, &check).exit_code,
+            0
+        );
+        let other = cache::Store::open(
+            root.path().into(),
+            "https://git.co.codes/owner/other.git",
+            &image,
+        )
+        .unwrap();
+        let third = tempfile::tempdir().unwrap();
+        let third_runtime = tempfile::tempdir().unwrap();
+        assert_eq!(
+            run(third.path(), third_runtime.path(), &other, &cache_step).exit_code,
+            0
+        );
+        assert!(!third.path().join(".cache/dependencies/file").exists());
+    }
+
+    #[test]
+    #[ignore = "requires the prepared Node runner image in CO_TEST_TOOL_IMAGE"]
     fn github_runtime_keeps_job_state_without_exposing_host_credentials() {
         let image = std::env::var("CO_TEST_TOOL_IMAGE").expect("CO_TEST_TOOL_IMAGE");
         let job: Assignment = serde_json::from_value(serde_json::json!({
@@ -1897,7 +2052,7 @@ mod github_tests {
             "test \"$RESULT\" = ready; test \"$(demo)\" = installed; test '${{ steps.setup.outputs.version }}' = 42; test -z \"${CO_RUNNER_TEST_SECRET:-}\"; test ! -e /run/co-environment-host; test \"$GITHUB_SHA\" = aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa; test ! -w /usr/local/bin",
         ].iter().enumerate() {
             let step = Step { name: format!("step-{index}"), run: (*run).into(), github: true, id: Some(if index == 0 { "setup" } else { "check" }.into()), ..Step::default() };
-            let result = execute_step(&image, checkout.path(), &step, &job, &AtomicBool::new(false), Instant::now() + STEP_TIMEOUT, (&Logs::default(), Some(runtime.path())));
+            let result = execute_step(&image, checkout.path(), &step, &job, &AtomicBool::new(false), Instant::now() + STEP_TIMEOUT, (&Logs::default(), Some(runtime.path()), None));
             assert_eq!(result.exit_code, 0, "{}", result.output);
     }
     }
@@ -1923,7 +2078,7 @@ mod github_tests {
         ].iter().enumerate() {
             let encoded = STANDARD.encode(serde_json::to_vec(plan).unwrap());
             let step = Step { name: format!("action-{index}"), run: format!("node /run/co-action.mjs '{encoded}'"), github: true, id: Some(format!("action_{index}")), workflow_network: Some("outbound".into()), ..Step::default() };
-            let result = execute_step(&image, checkout.path(), &step, &job, &AtomicBool::new(false), Instant::now() + STEP_TIMEOUT, (&Logs::default(), Some(runtime.path())));
+            let result = execute_step(&image, checkout.path(), &step, &job, &AtomicBool::new(false), Instant::now() + STEP_TIMEOUT, (&Logs::default(), Some(runtime.path()), None));
             assert_eq!(result.exit_code, 0, "{}", result.output);
         }
         let step = Step { name: "Verify tools offline".into(), run: "test \"$(bun --version)\" = 1.3.13; node --version | grep '^v22\\.'; tofu version | grep 'OpenTofu v1.12.5'; test -n '${{ steps.action_3.outputs.time }}'".into(), github: true, ..Step::default() };
@@ -1934,7 +2089,7 @@ mod github_tests {
             &job,
             &AtomicBool::new(false),
             Instant::now() + STEP_TIMEOUT,
-            (&Logs::default(), Some(runtime.path())),
+            (&Logs::default(), Some(runtime.path()), None),
         );
         assert_eq!(result.exit_code, 0, "{}", result.output);
     }

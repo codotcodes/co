@@ -5,6 +5,7 @@ use std::thread;
 use std::time::Duration;
 mod action_outputs;
 mod artifacts;
+mod cache;
 mod live_logs;
 mod runner;
 

@@ -12,6 +12,7 @@ import { gunzipSync } from "node:zlib";
 import { spawnSync } from "node:child_process";
 import { pathToFileURL } from "node:url";
 import { expandWorkflow, readBounded, runStep } from "./command_files.mjs";
+import { runCache } from "./cache_runtime.mjs";
 
 const digest = (bytes) => createHash("sha256").update(bytes).digest("hex");
 const arch = process.arch === "arm64" ? "arm64" : "x64";
@@ -280,6 +281,10 @@ export async function runAction(plan) {
   }
   if (plan.adapter === "opentofu/setup-opentofu") {
     await installTool("tofu", inputs.tofu_version || "latest");
+    return;
+  }
+  if (plan.adapter === "actions/cache") {
+    runCache(inputs);
     return;
   }
   if (

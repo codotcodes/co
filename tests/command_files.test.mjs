@@ -15,6 +15,7 @@ import {
   parseCommands,
   pathCommands,
   readBounded,
+  hashFiles,
   runStep,
 } from "../src/machine/command_files.mjs";
 
@@ -118,6 +119,22 @@ test("dynamic masks also exclude published action outputs", () => {
     assert.deepEqual(JSON.parse(readFileSync(output, "utf8")), {
       safe: "public",
     });
+  } finally {
+    rmSync(root, { recursive: true });
+  }
+});
+
+test("hashFiles binds cache keys to bounded literal workspace files", () => {
+  const root = mkdtempSync(join(tmpdir(), "co-hash-files-"));
+  try {
+    writeFileSync(join(root, "bun.lock"), "first");
+    const first = hashFiles(["bun.lock"], root);
+    assert.equal(first.length, 64);
+    assert.equal(hashFiles(["**/bun.lock"], root), first);
+    writeFileSync(join(root, "bun.lock"), "second");
+    assert.notEqual(hashFiles(["bun.lock"], root), first);
+    assert.equal(hashFiles(["missing"], root), "");
+    assert.throws(() => hashFiles(["../outside"], root));
   } finally {
     rmSync(root, { recursive: true });
   }

@@ -87,6 +87,16 @@ Docker actions, expressions and GitHub service APIs. An unavailable feature must
 fail rather than be treated as successful. Existing controller secret, retry,
 resource, log and lease rules continue to apply.
 
+The optional `actions/cache` adapter restores read-only repository/image-scoped
+entries from the local runner. `CO_MACHINE_CACHE_DIR` overrides the default
+`runner-cache` sibling of the CLI profile. Use a dedicated empty directory;
+the runner will not adopt an unrelated populated directory. Entries are
+immutable, at most 32 MiB/4096 regular files, with a 1 GiB host budget and bounded
+eviction. Only controller-authorized, successful secret-free push jobs publish,
+after successful completion is acknowledged. PRs, manual jobs, retries, failures
+and cancellations cannot publish. Nothing is shared writable between jobs.
+Symlinks/hardlinks are not cached, and cache data must never contain credentials.
+
 ### Native deployments
 
 `co deployment configure OWNER/REPO ENV --file POLICY.json` creates or updates an owner-managed deployment environment. The policy names the protected branch, required native jobs, build artifact and Cloudflare Worker target. `co deployment set-secret OWNER/REPO NAME --environment ENV` reads a write-only deployment secret from an echo-disabled prompt, standard input, or `--value-file PATH`. Omit `--environment` for a repository-scoped deployment secret. These secrets are separate from ordinary workflow secrets and are never passed to build jobs.
