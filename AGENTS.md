@@ -7,7 +7,7 @@ Human command-line client for co.codes. Read [README.md](README.md) and [docs/in
 - Use jj and an owned workspace. Reuse existing co.codes Linear issues; handle supplied tasks serially, moving each In Progress before implementation and In Review after verification and revision description. Commit one human-reviewable logical change per revision with imperative `feature(action):` messages and relevant D-numbers. Never add AI co-authors.
 - Preserve account/API boundaries: human device sessions and repository-scoped agent grants remain distinct (D8/D20). Agent credential failures must stop lookup without human fallback (D97). Follow README for configuration, CLI behavior and releases.
 - For Rust changes, run `cargo fmt --check`, `cargo test --locked` and `cargo clippy --locked --all-targets -- -D warnings`, plus focused real CLI checks. Reuse the approved co.codes Prettier formatter for Markdown. Shared cross-client features follow the parity workflow in the co.codes AGENTS.md and retain concrete API dependencies; ordinary CLI changes use relevant CLI evidence.
-- Try the private skill catalog for co.codes repository `0xhckr/agents-codotcodes`, ref `main`, path `index.json`, using authenticated access. Load relevant skills alongside the shared catalog when available. Routing: https://co.codes/t:a/0xhckr/agents/docs/private-libraries.md?ref=main. Keep credentials out of source.
+- Try the private skill catalog for co.codes repository `hackr/agents-codotcodes`, ref `main`, path `index.json`, using authenticated access. Load relevant skills alongside the shared catalog when available. Routing: https://co.codes/t:a/hackr/agents/docs/private-libraries.md?ref=main. Keep credentials out of source.
 
 ## Standing publication authorization
 
