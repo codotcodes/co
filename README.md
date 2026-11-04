@@ -9,7 +9,8 @@ The CLI supports browser-based device login, account inspection, human-approved 
 The Go implementation currently supports `login`, `workflow check`, `version`,
 `whoami`, `logout`, `git-credential`, `access view`, `access wait`, `agent register`,
 `agent list`, `agent attest`, `repo view`, `repo create`, `clone`, `link` and
-`secret set`, `deployment` and `doctor`.
+`secret set`, `deployment`, `doctor`, `machine enroll`, `machine list` and
+`machine heartbeat`.
 With Go 1.26 installed, build it with `go build -o /tmp/opencode/co-go ./cmd/co`.
 Workflow checking does not load credentials. Account commands use the existing
 profile and human session; unsupported commands never fall back to Rust.
@@ -74,6 +75,13 @@ Deployment commands preserve explicit human-session mode, reauthentication,
 environment/secret versions and receipt checks. Configuration and secret files
 are bounded; redirects and automatic write retries are refused. Listing retains
 session redaction and refuses other known credential material.
+
+Machine enrollment keeps setup-key redemption anonymous and owner registration
+on the API-bound human session. It stores runner credentials privately with an
+explicit API binding. Heartbeats use only the selected runner credential and
+distinguish retryable service failures from revocation. `machine run` remains
+unported. Resource detection is runtime-verified on this Linux host; nested
+cgroup and non-Linux runtime acceptance still need verification.
 
 Run `go test -race ./...` and `go vet ./...` for the Go code. Set
 `CO_TEST_RUST_BINARY` and `CO_TEST_GO_BINARY` to frozen compiled binaries for
