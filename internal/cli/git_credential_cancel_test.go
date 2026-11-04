@@ -17,7 +17,7 @@ func TestAgentHelperCancellationStillQuits(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("Linux process signal fixture")
 	}
-	_, goBinary := comparisonBinaries(t)
+	goBinary := goBinaryForTests(t)
 	root := t.TempDir()
 	path := filepath.Join(root, "profile", "config.json")
 	started, release := make(chan struct{}), make(chan struct{})

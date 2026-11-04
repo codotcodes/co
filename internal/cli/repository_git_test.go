@@ -121,13 +121,12 @@ func TestRealGitCloneLinkAndStableHelperSymlink(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("Linux symlink and real Git fixture")
 	}
-	rust, goBinary := comparisonBinaries(t)
 	git, err := exec.LookPath("git")
 	if err != nil {
 		t.Fatal(err)
 	}
-	for index, binary := range []string{rust, goBinary} {
-		t.Run([]string{"rust", "go"}[index], func(t *testing.T) {
+	for name, binary := range contractBinaries(t) {
+		t.Run(name, func(t *testing.T) {
 			root := t.TempDir()
 			runGit := func(directory string, args ...string) string {
 				t.Helper()
@@ -189,7 +188,7 @@ func TestRealGitCloneLinkAndStableHelperSymlink(t *testing.T) {
 			}
 		})
 	}
-	t.Log("real Git clone/link preserves contents, remotes, helper resets, path scoping and installation symlinks for both CLIs; URL rewrite keeps all traffic local")
+	t.Log("real Git clone/link preserves contents, remotes, helper resets, path scoping and installation symlinks; URL rewrite keeps all traffic local")
 }
 
 func TestRepositoryRemoteAndWindowsShellPaths(t *testing.T) {

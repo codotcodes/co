@@ -23,10 +23,7 @@ func TestCompiledRunnerNativeGitContainerArtifactLifecycle(t *testing.T) {
 	if runtime.GOOS != "linux" || os.Getenv("CO_TEST_REAL_PODMAN") != "1" {
 		t.Skip("set CO_TEST_REAL_PODMAN=1 for full native runner acceptance")
 	}
-	binaryPath := os.Getenv("CO_TEST_GO_BINARY")
-	if binaryPath == "" {
-		t.Skip("set the compiled Go CLI")
-	}
+	binaryPath := goBinaryForTests(t)
 	root := t.TempDir()
 	git, err := exec.LookPath("git")
 	if err != nil {

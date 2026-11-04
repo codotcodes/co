@@ -151,7 +151,7 @@ func TestCompiledAgentAccessAndAttestationRustParity(t *testing.T) {
 }
 
 func TestAgentViewHonorsSelectedIdentityAndRejectsSecretDocuments(t *testing.T) {
-	_, goBinary := comparisonBinaries(t)
+	goBinary := goBinaryForTests(t)
 	root := t.TempDir()
 	path := filepath.Join(root, "profile", "config.json")
 	var mode atomic.Value

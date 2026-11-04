@@ -132,7 +132,7 @@ func TestCompiledGitCredentialRustParity(t *testing.T) {
 }
 
 func TestAgentCredentialInputAndAPIBindingFailClosed(t *testing.T) {
-	_, goBinary := comparisonBinaries(t)
+	goBinary := goBinaryForTests(t)
 	root := t.TempDir()
 	path := filepath.Join(root, "profile", "config.json")
 	var mu sync.Mutex
@@ -173,8 +173,7 @@ func TestAgentCredentialInputAndAPIBindingFailClosed(t *testing.T) {
 }
 
 func TestRealGitStopsBeforeHumanHelper(t *testing.T) {
-	rust, goBinary := comparisonBinaries(t)
-	for _, binary := range []string{rust, goBinary} {
+	for _, binary := range contractBinaries(t) {
 		root := t.TempDir()
 		path := filepath.Join(root, "profile", "config.json")
 		var mode atomic.Value
@@ -216,5 +215,5 @@ func TestRealGitStopsBeforeHumanHelper(t *testing.T) {
 			}
 		}
 	}
-	t.Log("real Git stops helper chaining on scoped agent failure for Rust and Go")
+	t.Log("real Git stops helper chaining on scoped agent failure")
 }

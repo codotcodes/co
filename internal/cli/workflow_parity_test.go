@@ -50,11 +50,11 @@ func invokeInput(t *testing.T, binary, root string, args, extraEnv []string, inp
 
 func comparisonBinaries(t *testing.T) (string, string) {
 	t.Helper()
-	rust, goBinary := os.Getenv("CO_TEST_RUST_BINARY"), os.Getenv("CO_TEST_GO_BINARY")
-	if rust == "" || goBinary == "" {
-		t.Skip("set compiled Rust/Go CLI binaries for behavioral comparisons")
+	rust := os.Getenv("CO_TEST_RUST_BINARY")
+	if rust == "" {
+		t.Skip("set a frozen CO_TEST_RUST_BINARY for migration comparisons")
 	}
-	return rust, goBinary
+	return rust, goBinaryForTests(t)
 }
 
 func compare(t *testing.T, rust, goBinary, root string, args, env []string) observation {

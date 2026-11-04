@@ -34,7 +34,7 @@ func runnerFileOracle(t *testing.T, input any, output any) {
 	}
 }
 
-func TestRunnerArtifactsMatchCompiledRust(t *testing.T) {
+func TestRunnerArtifactContract(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("Unix runner file collection")
 	}
@@ -90,24 +90,29 @@ func TestRunnerArtifactsMatchCompiledRust(t *testing.T) {
 					writeFixture(t, filepath.Join(dist, "many", strings.Repeat("x", index/1000)+string(rune('a'+index%26))+"-"+base64.RawURLEncoding.EncodeToString([]byte{byte(index >> 8), byte(index)})), "", 0600)
 				}
 			}
-			var expected struct {
-				OK    bool   `json:"ok"`
-				Bytes string `json:"bytes"`
-			}
-			runnerFileOracle(t, map[string]any{"mode": "artifact", "directory": root, "output": output}, &expected)
 			actual, err := collectRunnerArtifact(root, output)
-			if expected.OK != (err == nil) || expected.OK && base64.StdEncoding.EncodeToString(actual) != expected.Bytes {
-				t.Fatal("artifact differs from Rust", scenario, err)
+			wantOK := scenario == "deterministic" || scenario == "binary"
+			if wantOK != (err == nil) {
+				t.Fatal("artifact acceptance changed", scenario, err)
 			}
 			if scenario == "deterministic" && runnerDigest(actual) != "62661a2f38380178a1c97e41472dcd809cd9ee3964d41d46a4aaf31a34cfc9f7" {
 				t.Fatal("artifact manifest or payload changed")
 			}
+			if os.Getenv("CO_TEST_RUST_RUNNER_FILES_BINARY") != "" {
+				var expected struct {
+					OK    bool   `json:"ok"`
+					Bytes string `json:"bytes"`
+				}
+				runnerFileOracle(t, map[string]any{"mode": "artifact", "directory": root, "output": output}, &expected)
+				if expected.OK != wantOK || wantOK && base64.StdEncoding.EncodeToString(actual) != expected.Bytes {
+					t.Fatal("artifact differs from Rust", scenario, err)
+				}
+			}
 		})
 	}
-	t.Log("11 artifact collection scenarios match retained Rust acceptance and exact COAR1 bytes")
 }
 
-func TestRunnerActionOutputsMatchCompiledRust(t *testing.T) {
+func TestRunnerActionOutputContract(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("Unix runner file collection")
 	}
@@ -166,12 +171,23 @@ func TestRunnerActionOutputsMatchCompiledRust(t *testing.T) {
 				writeFixture(t, path, content, 0600)
 			}
 			var expected map[string]string
-			runnerFileOracle(t, map[string]any{"mode": "outputs", "directory": root, "declared": keys, "secrets": secrets}, &expected)
+			switch scenario {
+			case "declared":
+				expected = map[string]string{"url": "https://site.invalid", "version_id": "v1"}
+			case "plain-secret", "unicode":
+				expected = map[string]string{"version_id": "v1"}
+			}
 			actual := collectRunnerActionOutputs(root, keys, secrets)
 			if !reflect.DeepEqual(actual, expected) {
-				t.Fatal("action outputs differ from Rust", scenario)
+				t.Fatal("action output contract changed", scenario, actual)
+			}
+			if os.Getenv("CO_TEST_RUST_RUNNER_FILES_BINARY") != "" {
+				var oracle map[string]string
+				runnerFileOracle(t, map[string]any{"mode": "outputs", "directory": root, "declared": keys, "secrets": secrets}, &oracle)
+				if !reflect.DeepEqual(actual, oracle) {
+					t.Fatal("action outputs differ from Rust", scenario)
+				}
 			}
 		})
 	}
-	t.Log("17 action output scenarios match retained Rust bounds, declared keys, link rejection and encoded secret omission")
 }

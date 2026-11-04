@@ -21,7 +21,7 @@ func runnerLogOracle(t *testing.T, input, actual any) {
 	t.Helper()
 	binary := os.Getenv("CO_TEST_RUST_RUNNER_LOGS_BINARY")
 	if binary == "" {
-		t.Skip("set the frozen retained Rust log probe")
+		return
 	}
 	raw, _ := json.Marshal(input)
 	command := exec.CommandContext(t.Context(), binary, "__migration-validate")
@@ -41,16 +41,17 @@ func runnerLogOracle(t *testing.T, input, actual any) {
 	}
 }
 
-func TestRunnerSecretMaskerMatchesCompiledRust(t *testing.T) {
+func TestRunnerSecretMaskerContract(t *testing.T) {
 	for _, test := range []struct {
 		input   string
 		secrets []string
+		want    string
 	}{
-		{"before secret after!", []string{"secret"}},
-		{"sec\x00ret first\nsecond first second", []string{"secret", "first\nsecond"}},
-		{"🦀token and 🦀", []string{"🦀token", "🦀"}},
-		{"abcabcdabcde", []string{"abc", "abcd", "bcde"}},
-		{"normal short lines\n", nil},
+		{"before secret after!", []string{"secret"}, "before *** after!"},
+		{"sec\x00ret first\nsecond first second", []string{"secret", "first\nsecond"}, "*** *** *** ***"},
+		{"🦀token and 🦀", []string{"🦀token", "🦀"}, "*** and ***"},
+		{"abcabcdabcde", []string{"abc", "abcd", "bcde"}, "*********e"},
+		{"normal short lines\n", nil, "normal short lines\n"},
 	} {
 		for split := 0; split <= len(test.input); split++ {
 			if split < len(test.input) && test.input[split]&0xc0 == 0x80 {
@@ -59,6 +60,9 @@ func TestRunnerSecretMaskerMatchesCompiledRust(t *testing.T) {
 			chunks := []string{test.input[:split], test.input[split:]}
 			masker := newRunnerSecretMasker(test.secrets)
 			actual := []string{masker.feed(chunks[0], false), masker.feed(chunks[1], false), masker.feed("", true)}
+			if strings.Join(actual, "") != test.want {
+				t.Fatal("masking changed at split", split, actual)
+			}
 			secrets := test.secrets
 			if secrets == nil {
 				secrets = []string{}
@@ -68,7 +72,7 @@ func TestRunnerSecretMaskerMatchesCompiledRust(t *testing.T) {
 	}
 }
 
-func TestRunnerLogHashesDeltasAndBoundsMatchCompiledRust(t *testing.T) {
+func TestRunnerLogHashesDeltasAndBoundsContract(t *testing.T) {
 	logs := &runnerLogs{}
 	previous := []runnerLiveStep{}
 	var actions, actual []any
@@ -135,8 +139,17 @@ func (reader *runnerChunkReader) Read(out []byte) (int, error) {
 	return n, nil
 }
 
-func TestRunnerLogDrainingMatchesCompiledRust(t *testing.T) {
-	for _, input := range [][]byte{[]byte("hello 🦀 secret\n"), {255, 255, 0xe2, 0x82, 'x', 0xed, 0xa0, 0x80}, {0xf0, 0x9f, 0xa6}, []byte("control\x1b\x00 sec\x00ret <text>\n")} {
+func TestRunnerLogDrainingContract(t *testing.T) {
+	for _, test := range []struct {
+		input []byte
+		want  string
+	}{
+		{[]byte("hello 🦀 secret\n"), "hello 🦀 ***\n"},
+		{[]byte{255, 255, 0xe2, 0x82, 'x', 0xed, 0xa0, 0x80}, "���x���"},
+		{[]byte{0xf0, 0x9f, 0xa6}, "�"},
+		{[]byte("control\x1b\x00 sec\x00ret <text>\n"), "control *** <text>\n"},
+	} {
+		input := test.input
 		for chunkSize := 1; chunkSize <= len(input); chunkSize++ {
 			var chunks [][]byte
 			var encoded []string
@@ -149,6 +162,9 @@ func TestRunnerLogDrainingMatchesCompiledRust(t *testing.T) {
 			logs.begin("stream")
 			drainRunnerLogs(&runnerChunkReader{chunks: chunks}, logs, 0, []string{"secret"})
 			snapshot := logs.snapshot()
+			if len(snapshot) != 1 || snapshot[0].Output != test.want {
+				t.Fatal("log draining changed at chunk size", chunkSize, snapshot)
+			}
 			runnerLogOracle(t, map[string]any{"mode": "drain", "chunks": encoded, "secrets": []string{"secret"}}, map[string]any{"steps": snapshot, "hash": runnerLogHash(snapshot)})
 		}
 	}

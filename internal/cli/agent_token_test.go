@@ -30,8 +30,7 @@ func TestAgentGrantSelectionExpiryAndOriginMapping(t *testing.T) {
 }
 
 func TestAgentMintIsFreshAndRevocationNeverUsesHuman(t *testing.T) {
-	rust, goBinary := comparisonBinaries(t)
-	for _, binary := range []string{rust, goBinary} {
+	for _, binary := range contractBinaries(t) {
 		root := t.TempDir()
 		path := filepath.Join(root, "profile", "config.json")
 		var calls atomic.Int64
@@ -63,7 +62,7 @@ func TestAgentMintIsFreshAndRevocationNeverUsesHuman(t *testing.T) {
 }
 
 func TestUnsafeMintResponsesAndRedirectsNeverEmitCredentials(t *testing.T) {
-	_, goBinary := comparisonBinaries(t)
+	goBinary := goBinaryForTests(t)
 	root := t.TempDir()
 	path := filepath.Join(root, "profile", "config.json")
 	var targetCalls atomic.Int64
