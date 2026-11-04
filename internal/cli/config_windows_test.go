@@ -3,12 +3,47 @@ package cli
 import (
 	"bytes"
 	"encoding/json"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"golang.org/x/sys/windows"
 )
+
+func TestWindowsConfigReplacementKeepsOpenSnapshot(t *testing.T) {
+	path := isolatedConfig(t)
+	writeConfigFixture(t, path, fullConfig("https://fixture.invalid"))
+	security, err := newConfigSecurity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := security.open(path, windows.GENERIC_READ, windows.OPEN_EXISTING)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer snapshot.Close()
+	if err := mutateConfig(func(config configuration) error {
+		config["snapshot"] = json.RawMessage(`"replacement"`)
+		return nil
+	}); err != nil {
+		t.Fatal("cannot replace config while an authorized reader holds the old snapshot", err)
+	}
+	old, err := io.ReadAll(snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	previous, err := parseConfig(old)
+	if err != nil || previous["snapshot"] != nil {
+		t.Fatal("open reader did not retain its complete old snapshot", err)
+	}
+	current, err := loadConfig()
+	if err != nil || string(current["snapshot"]) != `"replacement"` {
+		t.Fatal("new reader did not observe the complete replacement", err)
+	}
+}
 
 func TestWindowsConfigRewritesKeepOwnerOnlyACLs(t *testing.T) {
 	binary := goBinaryForTests(t)

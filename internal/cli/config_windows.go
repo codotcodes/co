@@ -171,13 +171,37 @@ func createConfigTemp(parent string) (*os.File, error) {
 }
 
 func replaceConfig(source, destination string) error {
-	from, err := windows.UTF16PtrFromString(source)
+	security, err := newConfigSecurity()
 	if err != nil {
 		return err
 	}
-	to, err := windows.UTF16PtrFromString(destination)
+	file, err := security.open(source, windows.DELETE, windows.OPEN_EXISTING)
 	if err != nil {
 		return err
 	}
-	return windows.MoveFileEx(from, to, windows.MOVEFILE_REPLACE_EXISTING|windows.MOVEFILE_WRITE_THROUGH)
+	defer file.Close()
+	absolute, err := filepath.Abs(destination)
+	if err != nil {
+		return err
+	}
+	name, err := windows.UTF16FromString(absolute)
+	if err != nil {
+		return err
+	}
+	type renameInformation struct {
+		Flags          uint32
+		RootDirectory  windows.Handle
+		FileNameLength uint32
+		FileName       [1]uint16
+	}
+	var layout renameInformation
+	offset := unsafe.Offsetof(layout.FileName)
+	buffer := make([]byte, int(offset)+len(name)*2)
+	info := (*renameInformation)(unsafe.Pointer(&buffer[0]))
+	// Keep existing reader handles on their old snapshot while new opens see
+	// the complete replacement. MoveFileEx rejects these concurrent readers.
+	info.Flags = windows.FILE_RENAME_REPLACE_IF_EXISTS | windows.FILE_RENAME_POSIX_SEMANTICS
+	info.FileNameLength = uint32((len(name) - 1) * 2)
+	copy(unsafe.Slice(&info.FileName[0], len(name)), name)
+	return windows.SetFileInformationByHandle(windows.Handle(file.Fd()), windows.FileRenameInfoEx, &buffer[0], uint32(len(buffer)))
 }
