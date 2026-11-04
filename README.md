@@ -4,6 +4,19 @@
 
 The CLI supports browser-based device login, account inspection, human-approved agent access, repository creation and metadata, Git clone and push authentication, and production diagnostics.
 
+## Go migration
+
+The Go implementation currently supports `workflow check` and `version` only.
+With Go 1.26 installed, build it with `go build -o /tmp/opencode/co-go ./cmd/co`.
+It does not load credentials or fall back to Rust for unsupported commands.
+Its help identifies the partial command set. Release packaging, Nix packages and
+the default CLI still use Rust until the remaining command groups are migrated.
+
+Run `go test -race ./...` and `go vet ./...` for the Go code. Set
+`CO_TEST_RUST_BINARY` and `CO_TEST_GO_BINARY` to frozen compiled binaries for
+behavioral comparisons. Set `CO_TEST_WORKFLOWS_PACKAGE` to the installed
+`@cocodes/workflows` package directory to compare actual Bun checker behavior.
+
 ## Install
 
 Linux and macOS:
