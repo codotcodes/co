@@ -10,9 +10,8 @@ All CLI command groups now have Go implementations, including the connected
 machine runner. Help, version, usage and argument handling match the existing CLI.
 With Go 1.26 installed, build it with `go build -o /tmp/opencode/co-go ./cmd/co`.
 Workflow checking does not load credentials. Account commands use the existing
-profile and human session. There is no Rust fallback. Release packaging, Nix
-packages and default build wrappers still use Rust until their replacement
-checks finish.
+profile and human session. There is no Rust fallback. Nix and
+`scripts/build.sh` build Go. CI and release workflow conversion is still pending.
 
 Go profile updates retain unknown fields and existing agent, machine and pending
 request records. Writes use a private temporary file and the shared config lock
@@ -270,12 +269,15 @@ Set `CO_CONFIG_DIR` to a nonempty directory path to store `config.json` and its 
 ## Build
 
 ```sh
-cargo test
-cargo build --release
+go test -race ./...
+go vet ./...
+go build -mod=readonly -trimpath -o co ./cmd/co
 nix build
 ```
 
-The minimum supported Rust version is 1.85.
+Requires Go 1.26. `internal/cli/version.go` owns the version. To build a release
+target with the existing archive name, use `sh scripts/build.sh TARGET OUTPUT`.
+All release targets build without cgo or a C toolchain, including Windows.
 
 ## Releases
 
