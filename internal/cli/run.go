@@ -28,6 +28,7 @@ const partialHelp = `co: partial Go migration
   link [opts] <repo>      configure a local repository remote
   secret set [opts] <name>  create or replace a workflow secret
   deployment <command>    manage human-approved deployments
+  doctor                  check API, session and Git availability
   version                 print version
 
 Other commands still require the Rust CLI. This binary never falls back to it.`
@@ -38,6 +39,8 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 		command = args[0]
 	}
 	switch command {
+	case "doctor":
+		return doctor(stdout)
 	case "deployment":
 		return runDeployment(args[1:], stdin, stdout)
 	case "secret":
