@@ -20,3 +20,16 @@ func openRunnerRegular(path string, limit int64, expected os.FileInfo) (*os.File
 	}
 	return file, nil
 }
+
+func openRunnerLock(path string) (*os.File, error) {
+	file, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|syscall.O_NOFOLLOW, 0600)
+	if err != nil {
+		return nil, err
+	}
+	stat, err := file.Stat()
+	if err != nil || !stat.Mode().IsRegular() || stat.Sys().(*syscall.Stat_t).Nlink != 1 {
+		file.Close()
+		return nil, errors.New("invalid runner lock")
+	}
+	return file, nil
+}
