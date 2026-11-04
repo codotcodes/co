@@ -2,7 +2,9 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -11,6 +13,45 @@ import (
 	"testing"
 	"time"
 )
+
+func TestConfigMutationCancellationKeepsCommittedCredentials(t *testing.T) {
+	path := isolatedConfig(t)
+	writeConfigFixture(t, path, fullConfig("https://fixture.invalid"))
+	before, _ := os.ReadFile(path)
+	file, err := openConfigLock(path + ".lock")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	if err := lockConfig(file); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
+	called := false
+	err = mutateConfigContext(ctx, func(configuration) error { called = true; return nil })
+	cancel()
+	unlockConfig(file)
+	if !errors.Is(err, context.DeadlineExceeded) || called {
+		t.Fatal("config lock wait ignored cancellation", err)
+	}
+	ctx, cancel = context.WithCancel(t.Context())
+	err = mutateConfigContext(ctx, func(config configuration) error {
+		config["session_token"] = json.RawMessage(`"must-not-publish"`)
+		cancel()
+		return nil
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatal("canceled config publication succeeded", err)
+	}
+	after, _ := os.ReadFile(path)
+	if !bytes.Equal(before, after) {
+		t.Fatal("cancellation changed credentials")
+	}
+	files, _ := filepath.Glob(filepath.Join(filepath.Dir(path), "*.tmp"))
+	if len(files) != 0 {
+		t.Fatal("canceled temporary credentials leaked")
+	}
+}
 
 func TestRustAndGoConfigLocksInteroperate(t *testing.T) {
 	if runtime.GOOS == "windows" {

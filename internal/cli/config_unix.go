@@ -37,7 +37,14 @@ func openConfigLock(path string) (*os.File, error) {
 	}
 	return file, nil
 }
-func lockConfig(file *os.File) error   { return unix.Flock(int(file.Fd()), unix.LOCK_EX) }
+func lockConfig(file *os.File) error { return unix.Flock(int(file.Fd()), unix.LOCK_EX) }
+func tryConfigLock(file *os.File) (bool, error) {
+	err := unix.Flock(int(file.Fd()), unix.LOCK_EX|unix.LOCK_NB)
+	if errors.Is(err, unix.EWOULDBLOCK) || errors.Is(err, unix.EINTR) {
+		return false, nil
+	}
+	return err == nil, err
+}
 func unlockConfig(file *os.File) error { return unix.Flock(int(file.Fd()), unix.LOCK_UN) }
 func createConfigTemp(parent string) (*os.File, error) {
 	return os.CreateTemp(parent, "config.json.*.tmp")

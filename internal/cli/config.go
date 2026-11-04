@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 	"unicode/utf8"
 )
 
@@ -275,6 +277,13 @@ func uniqueJSON(decoder *json.Decoder) error {
 }
 
 func mutateConfig(update func(configuration) error) (result error) {
+	return mutateConfigContext(context.Background(), update)
+}
+
+func mutateConfigContext(ctx context.Context, update func(configuration) error) (result error) {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	path, err := configPath()
 	if err != nil {
 		return err
@@ -289,7 +298,10 @@ func mutateConfig(update func(configuration) error) (result error) {
 		return fmt.Errorf("unable to open %s: %s", lockPath, processError(err))
 	}
 	defer lock.Close()
-	if err := lockConfig(lock); err != nil {
+	if err := waitConfigLock(ctx, lock); err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
 		return fmt.Errorf("unable to lock %s: %s", lockPath, processError(err))
 	}
 	defer func() {
@@ -298,6 +310,9 @@ func mutateConfig(update func(configuration) error) (result error) {
 		}
 	}()
 	config, err := loadConfig()
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
 	if err != nil {
 		return err
 	}
@@ -327,8 +342,30 @@ func mutateConfig(update func(configuration) error) (result error) {
 	if err != nil {
 		return fmt.Errorf("unable to write %s: %s", name, processError(err))
 	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if err := replaceConfig(name, path); err != nil {
 		return fmt.Errorf("unable to replace %s: %s", path, processError(err))
 	}
 	return nil
+}
+
+func waitConfigLock(ctx context.Context, file *os.File) error {
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		locked, err := tryConfigLock(file)
+		if err != nil || locked {
+			return err
+		}
+		timer := time.NewTimer(20 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
 }

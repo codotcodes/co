@@ -1,6 +1,8 @@
 package cli
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,11 +14,28 @@ import (
 )
 
 func sessionRequest(config configuration, method, path, token string) (*http.Response, error) {
-	request, err := http.NewRequest(method, effectiveAPI(config)+path, nil)
+	return apiRequest(context.Background(), effectiveAPI(config), method, path, &token, nil)
+}
+
+func apiRequest(ctx context.Context, api, method, path string, token *string, body any) (*http.Response, error) {
+	var input io.Reader
+	if body != nil {
+		data, err := json.Marshal(body)
+		if err != nil {
+			return nil, err
+		}
+		input = bytes.NewReader(data)
+	}
+	request, err := http.NewRequestWithContext(ctx, method, api+path, input)
 	if err != nil {
 		return nil, errors.New("network request failed: invalid API URL")
 	}
-	request.Header.Set("Authorization", "Bearer "+token)
+	if token != nil {
+		request.Header.Set("Authorization", "Bearer "+*token)
+	}
+	if body != nil {
+		request.Header.Set("Content-Type", "application/json")
+	}
 	request.Header.Set("User-Agent", "co/"+Version)
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.DisableKeepAlives = true
@@ -24,6 +43,9 @@ func sessionRequest(config configuration, method, path, token string) (*http.Res
 	client := &http.Client{Transport: transport, Timeout: 30 * time.Second, CheckRedirect: func(next *http.Request, via []*http.Request) error {
 		if len(via) >= 10 {
 			return errors.New("too many redirects")
+		}
+		if body != nil && !sameAPIOrigin(next.URL, via[0].URL) {
+			return errors.New("credential payload redirect refused")
 		}
 		if !sameAPIOrigin(next.URL, via[0].URL) || via[len(via)-1].Header.Get("Authorization") == "" {
 			next.Header.Del("Authorization")
