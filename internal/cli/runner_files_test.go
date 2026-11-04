@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -87,7 +88,11 @@ func TestRunnerArtifactContract(t *testing.T) {
 				}
 			case "too-many":
 				for index := range 4096 {
-					writeFixture(t, filepath.Join(dist, "many", strings.Repeat("x", index/1000)+string(rune('a'+index%26))+"-"+base64.RawURLEncoding.EncodeToString([]byte{byte(index >> 8), byte(index)})), "", 0600)
+					writeFixture(t, filepath.Join(dist, "many", fmt.Sprintf("file-%04d", index)), "", 0600)
+				}
+				files, err := os.ReadDir(filepath.Join(dist, "many"))
+				if err != nil || len(files) != 4096 {
+					t.Fatal("artifact limit fixture must contain 4096 distinct files", len(files), err)
 				}
 			}
 			actual, err := collectRunnerArtifact(root, output)
