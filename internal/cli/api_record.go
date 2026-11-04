@@ -12,7 +12,14 @@ import (
 func apiRecord(response *http.Response, fields []string, prefix string) (configuration, error) {
 	defer response.Body.Close()
 	data, err := io.ReadAll(response.Body)
-	if err != nil || !utf8.Valid(data) || !validConfigUnicode(data) || !json.Valid(data) {
+	if err != nil {
+		return nil, fmt.Errorf("%s: invalid JSON", prefix)
+	}
+	return apiObject(data, fields, prefix)
+}
+
+func apiObject(data []byte, fields []string, prefix string) (configuration, error) {
+	if !utf8.Valid(data) || !validConfigUnicode(data) || !json.Valid(data) {
 		return nil, fmt.Errorf("%s: invalid JSON", prefix)
 	}
 	decoder := json.NewDecoder(bytes.NewReader(data))
