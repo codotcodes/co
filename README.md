@@ -6,8 +6,8 @@ The CLI supports browser-based device login, account inspection, human-approved 
 
 ## Go migration
 
-The Go implementation currently supports `workflow check`, `version`, `whoami`
-and `logout`.
+The Go implementation currently supports `login`, `workflow check`, `version`,
+`whoami` and `logout`.
 With Go 1.26 installed, build it with `go build -o /tmp/opencode/co-go ./cmd/co`.
 Workflow checking does not load credentials. Account commands use the existing
 profile and human session; unsupported commands never fall back to Rust.
@@ -20,6 +20,15 @@ before atomic replacement. Logout preserves a newer session saved while its
 revocation request was running. Redirects cannot restore stripped credentials.
 Windows config handling retains protected user-only DACLs, ownership checks and
 reparse-point rejection; its runtime verification remains pending.
+
+Device login supports pending approval, slower polling, denial, expiry and
+manual browser fallback. Ctrl-C cancels polling, HTTP requests and config-lock
+waits without replacing credentials. Successful login binds the session to the
+selected API and preserves unrelated profile records. If another process changes
+the session or API binding during approval, login refuses to overwrite it.
+Use a separate `CO_CONFIG_DIR` to log in to another API when the profile already
+contains agent, pending-request, grant or machine records.
+Verification URLs must use HTTP(S) without embedded credentials.
 
 Run `go test -race ./...` and `go vet ./...` for the Go code. Set
 `CO_TEST_RUST_BINARY` and `CO_TEST_GO_BINARY` to frozen compiled binaries for
