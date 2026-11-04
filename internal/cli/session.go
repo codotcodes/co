@@ -43,6 +43,14 @@ func requestAPIHeaders(ctx context.Context, api, method, path string, credential
 		}
 		input = bytes.NewReader(data)
 	}
+	contentType := ""
+	if body != nil {
+		contentType = "application/json"
+	}
+	return requestAPIReader(ctx, api, method, path, credential, input, contentType, headers)
+}
+
+func requestAPIReader(ctx context.Context, api, method, path string, credential *apiCredential, input io.Reader, contentType string, headers map[string]string) (*http.Response, error) {
 	request, err := http.NewRequestWithContext(ctx, method, api+path, input)
 	if err != nil {
 		return nil, errors.New("network request failed: invalid API URL")
@@ -50,8 +58,8 @@ func requestAPIHeaders(ctx context.Context, api, method, path string, credential
 	if credential != nil && credential.scheme != "" {
 		request.Header.Set("Authorization", credential.scheme+" "+credential.secret)
 	}
-	if body != nil {
-		request.Header.Set("Content-Type", "application/json")
+	if contentType != "" {
+		request.Header.Set("Content-Type", contentType)
 	}
 	request.Header.Set("User-Agent", "co/"+Version)
 	for key, value := range headers {
@@ -67,7 +75,7 @@ func requestAPIHeaders(ctx context.Context, api, method, path string, credential
 		if len(via) >= 10 {
 			return errors.New("too many redirects")
 		}
-		if body != nil && !sameAPIOrigin(next.URL, via[0].URL) {
+		if input != nil && !sameAPIOrigin(next.URL, via[0].URL) {
 			return errors.New("credential payload redirect refused")
 		}
 		if !sameAPIOrigin(next.URL, via[0].URL) || via[len(via)-1].Header.Get("Authorization") == "" {
