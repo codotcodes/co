@@ -6,11 +6,20 @@ The CLI supports browser-based device login, account inspection, human-approved 
 
 ## Go migration
 
-The Go implementation currently supports `workflow check` and `version` only.
+The Go implementation currently supports `workflow check`, `version`, `whoami`
+and `logout`.
 With Go 1.26 installed, build it with `go build -o /tmp/opencode/co-go ./cmd/co`.
-It does not load credentials or fall back to Rust for unsupported commands.
+Workflow checking does not load credentials. Account commands use the existing
+profile and human session; unsupported commands never fall back to Rust.
 Its help identifies the partial command set. Release packaging, Nix packages and
 the default CLI still use Rust until the remaining command groups are migrated.
+
+Go profile updates retain unknown fields and existing agent, machine and pending
+request records. Writes use a private temporary file and the shared config lock
+before atomic replacement. Logout preserves a newer session saved while its
+revocation request was running. Redirects cannot restore stripped credentials.
+Windows config handling retains protected user-only DACLs, ownership checks and
+reparse-point rejection; its runtime verification remains pending.
 
 Run `go test -race ./...` and `go vet ./...` for the Go code. Set
 `CO_TEST_RUST_BINARY` and `CO_TEST_GO_BINARY` to frozen compiled binaries for

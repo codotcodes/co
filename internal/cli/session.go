@@ -1,0 +1,165 @@
+package cli
+
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"strings"
+	"time"
+)
+
+func sessionRequest(config configuration, method, path, token string) (*http.Response, error) {
+	request, err := http.NewRequest(method, effectiveAPI(config)+path, nil)
+	if err != nil {
+		return nil, errors.New("network request failed: invalid API URL")
+	}
+	request.Header.Set("Authorization", "Bearer "+token)
+	request.Header.Set("User-Agent", "co/"+Version)
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.DisableKeepAlives = true
+	defer transport.CloseIdleConnections()
+	client := &http.Client{Transport: transport, Timeout: 30 * time.Second, CheckRedirect: func(next *http.Request, via []*http.Request) error {
+		if len(via) >= 10 {
+			return errors.New("too many redirects")
+		}
+		if !sameAPIOrigin(next.URL, via[0].URL) || via[len(via)-1].Header.Get("Authorization") == "" {
+			next.Header.Del("Authorization")
+			next.Header.Del("Cookie")
+		}
+		return nil
+	}}
+	response, err := client.Do(request)
+	if err != nil {
+		var timed interface{ Timeout() bool }
+		if errors.As(err, &timed) && timed.Timeout() {
+			return nil, errors.New("request timed out")
+		}
+		// Do not include a URL or headers that may contain credential material.
+		return nil, errors.New("network request failed")
+	}
+	return response, nil
+}
+
+func sameAPIOrigin(left, right *url.URL) bool {
+	port := func(value *url.URL) string {
+		if value.Port() != "" {
+			return value.Port()
+		}
+		if value.Scheme == "https" {
+			return "443"
+		}
+		return "80"
+	}
+	return strings.EqualFold(left.Scheme, right.Scheme) && strings.EqualFold(left.Hostname(), right.Hostname()) && port(left) == port(right)
+}
+
+func decodeSessionResponse(response *http.Response) (any, error) {
+	defer response.Body.Close()
+	decoder := json.NewDecoder(response.Body)
+	var body any
+	err := decoder.Decode(&body)
+	if err == nil {
+		var extra any
+		if decoder.Decode(&extra) != io.EOF {
+			err = errors.New("trailing JSON")
+		}
+	}
+	if response.StatusCode >= 200 && response.StatusCode < 300 {
+		if err != nil {
+			return nil, errors.New("invalid API response: invalid JSON")
+		}
+		return body, nil
+	}
+	if object, ok := body.(map[string]any); err == nil && ok {
+		valid := true
+		for _, name := range []string{"error_description", "message", "error"} {
+			if value := object[name]; value != nil {
+				if _, ok := value.(string); !ok {
+					valid = false
+				}
+			}
+		}
+		if valid {
+			for _, name := range []string{"error_description", "message", "error"} {
+				if value, ok := object[name].(string); ok {
+					return nil, errors.New(value)
+				}
+			}
+			return nil, errors.New("API request failed")
+		}
+	}
+	return nil, fmt.Errorf("HTTP %d %s", response.StatusCode, http.StatusText(response.StatusCode))
+}
+
+func whoami(stdout io.Writer) error {
+	config, err := loadConfig()
+	if err != nil {
+		return err
+	}
+	token := config.stringValue("session_token")
+	if token == nil {
+		return errors.New("not signed in; run `co login`")
+	}
+	response, err := sessionRequest(config, http.MethodGet, "/api/auth/get-session", *token)
+	if err != nil {
+		return err
+	}
+	body, err := decodeSessionResponse(response)
+	if err != nil {
+		return err
+	}
+	object, _ := body.(map[string]any)
+	user, exists := object["user"]
+	if !exists {
+		return errors.New("session is no longer valid; run `co login`")
+	}
+	fields, _ := user.(map[string]any)
+	name, email := "unknown", "unknown"
+	if value, ok := fields["name"].(string); ok {
+		name = value
+	}
+	if value, ok := fields["email"].(string); ok {
+		email = value
+	}
+	username := name
+	if value, ok := fields["username"].(string); ok {
+		username = value
+	}
+	_, err = fmt.Fprintf(stdout, "%s\n  name   %s\n  email  %s\n", username, name, email)
+	return err
+}
+
+func logout(stdout, stderr io.Writer) error {
+	config, err := loadConfig()
+	if err != nil {
+		return err
+	}
+	token := config.stringValue("session_token")
+	if token != nil {
+		response, err := sessionRequest(config, http.MethodPost, "/api/auth/sign-out", *token)
+		if err != nil {
+			fmt.Fprintln(stderr, "co: warning: unable to reach the server; removing the local session")
+		} else {
+			response.Body.Close()
+			if !(response.StatusCode >= 200 && response.StatusCode < 300) && response.StatusCode != 401 {
+				fmt.Fprintln(stderr, "co: warning: server did not confirm session revocation")
+			}
+		}
+	}
+	err = mutateConfig(func(current configuration) error {
+		fresh := current.stringValue("session_token")
+		sameSession := token == nil && fresh == nil || token != nil && fresh != nil && *token == *fresh
+		if sameSession && effectiveAPI(config) == effectiveAPI(current) {
+			current["session_token"] = json.RawMessage("null")
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	_, err = fmt.Fprintln(stdout, "Signed out.")
+	return err
+}
