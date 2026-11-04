@@ -9,7 +9,11 @@ import (
 )
 
 func lookupBun() (string, error) {
-	path, err := exec.LookPath("bun")
+	return lookupExecutable("bun")
+}
+
+func lookupExecutable(name string) (string, error) {
+	path, err := exec.LookPath(name)
 	if errors.Is(err, exec.ErrDot) {
 		return path, nil
 	}

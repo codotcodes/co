@@ -8,7 +8,7 @@ The CLI supports browser-based device login, account inspection, human-approved 
 
 The Go implementation currently supports `login`, `workflow check`, `version`,
 `whoami`, `logout`, `git-credential`, `access view`, `access wait`, `agent register`,
-`agent list`, `agent attest`, `repo view` and `repo create`.
+`agent list`, `agent attest`, `repo view`, `repo create`, `clone` and `link`.
 With Go 1.26 installed, build it with `go build -o /tmp/opencode/co-go ./cmd/co`.
 Workflow checking does not load credentials. Account commands use the existing
 profile and human session; unsupported commands never fall back to Rust.
@@ -58,6 +58,10 @@ private pending-request storage as `access wait`.
 `repo view` supports anonymous reads or the API-bound human session. `repo create`
 preserves explicit visibility, namespace selection, JSON output and unconfirmed
 Git initialization warnings. An uncertain creation is never retried automatically.
+`clone` and `link` preserve remote-name and jj preferences, reset inherited Git
+credential helpers for the selected host, enable path-scoped lookup and retain
+the installation symlink as the helper entrypoint. They never put credentials
+in Git arguments or remote URLs.
 
 Run `go test -race ./...` and `go vet ./...` for the Go code. Set
 `CO_TEST_RUST_BINARY` and `CO_TEST_GO_BINARY` to frozen compiled binaries for

@@ -12,15 +12,19 @@ import (
 )
 
 func lookupBun() (string, error) {
+	return lookupExecutable("bun")
+}
+
+func lookupExecutable(name string) (string, error) {
 	path, present := os.LookupEnv("PATH")
 	if !present {
 		path = "/bin:/usr/bin"
 	}
 	last := error(syscall.ENOENT)
 	for _, directory := range strings.Split(path, ":") {
-		candidate := "bun"
+		candidate := name
 		if directory != "" {
-			candidate = directory + "/bun"
+			candidate = directory + "/" + name
 		}
 		info, err := os.Stat(candidate)
 		if err == nil {
