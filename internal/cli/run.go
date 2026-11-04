@@ -17,6 +17,8 @@ const partialHelp = `co: partial Go migration
   logout                  revoke the local session
   git-credential <op>      serve scoped Git credentials
   access view <repo>       read a repository using an agent grant
+  agent register <name>   register a local agent identity
+  agent list              list local agent identities
   agent attest <repo> <oid>...  attest explicitly selected commits
   version                 print version
 
@@ -34,10 +36,16 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 		}
 		return fmt.Errorf("access command is not migrated to Go except `co access view <owner/repo>`")
 	case "agent":
+		if len(args) == 3 && args[1] == "register" {
+			return registerAgent(args[2], stdout)
+		}
+		if len(args) == 2 && args[1] == "list" {
+			return listAgents(stdout)
+		}
 		if len(args) >= 2 && args[1] == "attest" {
 			return attestAgentCommits(args[2:], stdout)
 		}
-		return fmt.Errorf("agent command is not migrated to Go except `co agent attest <owner/repo> <commit-oid>...`")
+		return fmt.Errorf("usage: co agent register <name> | co agent list | co agent attest <owner/repo> <commit-oid>...")
 	case "git-credential":
 		return gitCredentialCommand(args[1:], stdin, stdout)
 	case "login":

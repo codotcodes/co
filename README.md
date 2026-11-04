@@ -7,7 +7,8 @@ The CLI supports browser-based device login, account inspection, human-approved 
 ## Go migration
 
 The Go implementation currently supports `login`, `workflow check`, `version`,
-`whoami`, `logout`, `git-credential`, `access view` and `agent attest`.
+`whoami`, `logout`, `git-credential`, `access view`, `agent register`, `agent list`
+and `agent attest`.
 With Go 1.26 installed, build it with `go build -o /tmp/opencode/co-go ./cmd/co`.
 Workflow checking does not load credentials. Account commands use the existing
 profile and human session; unsupported commands never fall back to Rust.
@@ -41,7 +42,10 @@ binary automatically.
 the token-bearing self URL and refuses documents containing private credentials.
 `agent attest` requires an explicit agent and a live push grant. It validates the
 whole OID batch before sending requests, then stops at the first failure without
-replaying writes. Agent registration and access request/wait remain unported.
+replaying writes. `agent register` uses the API-bound human session and merges
+the returned identity into the latest private profile without overwriting
+concurrent changes. `agent list` reads local identities without contacting the
+API. Access request/wait remain unported.
 
 Run `go test -race ./...` and `go vet ./...` for the Go code. Set
 `CO_TEST_RUST_BINARY` and `CO_TEST_GO_BINARY` to frozen compiled binaries for
