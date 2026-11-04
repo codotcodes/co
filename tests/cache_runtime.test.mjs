@@ -1,7 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { cachePath, decodeCache } from "../src/machine/cache_runtime.mjs";
+import {
+  cachePath,
+  decodeCache,
+} from "../internal/cli/runtime/cache_runtime.mjs";
 
 const hash = (value) => createHash("sha256").update(value).digest("hex");
 function bundle(path = "@scope/file.txt") {

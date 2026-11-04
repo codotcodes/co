@@ -705,7 +705,9 @@ fn execute_step(
         let prepared = (|| -> Result<_, std::io::Error> {
             let root = runtime.ok_or_else(|| std::io::Error::other("missing job runtime"))?;
             let mut script = tempfile::NamedTempFile::new()?;
-            script.write_all(include_bytes!("command_files.mjs"))?;
+            script.write_all(include_bytes!(
+                "../../internal/cli/runtime/command_files.mjs"
+            ))?;
             let mut payload = tempfile::NamedTempFile::new()?;
             serde_json::to_writer(
                 &mut payload,
@@ -724,9 +726,13 @@ fn execute_step(
                 payload.path().display()
             ));
             let mut action = tempfile::NamedTempFile::new()?;
-            action.write_all(include_bytes!("action_runtime.mjs"))?;
+            action.write_all(include_bytes!(
+                "../../internal/cli/runtime/action_runtime.mjs"
+            ))?;
             let mut cache_runtime = tempfile::NamedTempFile::new()?;
-            cache_runtime.write_all(include_bytes!("cache_runtime.mjs"))?;
+            cache_runtime.write_all(include_bytes!(
+                "../../internal/cli/runtime/cache_runtime.mjs"
+            ))?;
             command.arg(format!(
                 "--volume={}:/run/cache_runtime.mjs:ro,Z",
                 cache_runtime.path().display()

@@ -17,7 +17,7 @@ import {
   readBounded,
   hashFiles,
   runStep,
-} from "../src/machine/command_files.mjs";
+} from "../internal/cli/runtime/command_files.mjs";
 
 test("parses bounded single and multiline command files without evaluating text", () => {
   assert.deepEqual(
@@ -88,8 +88,10 @@ test("command files never follow symlinks", () => {
 test("dynamic masks hide values and survive subsequent steps", () => {
   const root = mkdtempSync(join(tmpdir(), "co-masks-"));
   try {
-    const module = new URL("../src/machine/command_files.mjs", import.meta.url)
-      .href;
+    const module = new URL(
+      "../internal/cli/runtime/command_files.mjs",
+      import.meta.url,
+    ).href;
     const script = `import {runStep} from ${JSON.stringify(module)}; const root=${JSON.stringify(root)}; await runStep({root, command:'printf "::add-mask::private-value\\nprivate-value\\n"'}); await runStep({root, command:'echo private-value'});`;
     const result = spawnSync(
       process.execPath,
@@ -106,8 +108,10 @@ test("dynamic masks hide values and survive subsequent steps", () => {
 test("dynamic masks also exclude published action outputs", () => {
   const root = mkdtempSync(join(tmpdir(), "co-output-masks-"));
   try {
-    const module = new URL("../src/machine/command_files.mjs", import.meta.url)
-      .href;
+    const module = new URL(
+      "../internal/cli/runtime/command_files.mjs",
+      import.meta.url,
+    ).href;
     const output = join(root, "published.json");
     const script = `import {runStep} from ${JSON.stringify(module)}; process.env.CO_ACTION_OUTPUT=${JSON.stringify(output)}; await runStep({root:${JSON.stringify(root)}, outputKeys:["token","safe"], command:'echo "::add-mask::private-value"; printf "token=private-value\\nsafe=public\\n" >> "$GITHUB_OUTPUT"'});`;
     const result = spawnSync(

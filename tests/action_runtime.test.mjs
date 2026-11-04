@@ -10,7 +10,7 @@ import {
   expand,
   selectNode,
   validToolVersion,
-} from "../src/machine/action_runtime.mjs";
+} from "../internal/cli/runtime/action_runtime.mjs";
 
 function archive(name, type = "0", value = "fixture") {
   const header = Buffer.alloc(512);
@@ -85,8 +85,10 @@ test("tool versions cannot select arbitrary download paths", () => {
 test("composite steps carry environment and map declared outputs", () => {
   const root = mkdtempSync(join(tmpdir(), "co-composite-"));
   try {
-    const module = new URL("../src/machine/action_runtime.mjs", import.meta.url)
-      .href;
+    const module = new URL(
+      "../internal/cli/runtime/action_runtime.mjs",
+      import.meta.url,
+    ).href;
     const plan = {
       runs: {
         steps: [
