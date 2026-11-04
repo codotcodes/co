@@ -20,8 +20,8 @@ jobs:
           node-version: "24"
       - run: node --test tests/*.test.mjs
 
-  rust:
-    name: Rust (${{ matrix.os }})
+  go:
+    name: Go (${{ matrix.os }})
     timeout-minutes: 30
     strategy:
       matrix:
@@ -34,13 +34,15 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-go@v6
         with:
-          components: rustfmt, clippy
-      - run: cargo fmt --check
-      - run: cargo clippy --locked --all-targets -- -D warnings
+          go-version-file: go.mod
+      - name: Check formatting
+        shell: bash
+        run: test -z "$(gofmt -l cmd internal)"
+      - run: go vet ./...
       - if: runner.os != 'Windows'
-        run: cargo test --locked
+        run: go test -race ./... -count=1
       - if: runner.os == 'Windows'
         run: ./scripts/test-windows.ps1
       - if: always() && runner.os == 'Windows'
@@ -63,7 +65,9 @@ jobs:
         run: brew install shellcheck
       - run: shellcheck install.sh scripts/*.sh
       - run: sh -n install.sh scripts/*.sh
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
       - run: sh scripts/test-installer.sh
 
   homebrew:
@@ -85,18 +89,14 @@ jobs:
     runs-on: blacksmith-8vcpu-ubuntu-2404
     steps:
       - uses: actions/checkout@v7
-      - run: sudo apt-get update && sudo apt-get install -y musl-tools
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: x86_64-unknown-linux-musl
       - uses: actions/setup-go@v6
         with:
-          go-version: stable
+          go-version-file: go.mod
       - run: go install github.com/goreleaser/nfpm/v2/cmd/nfpm@v2.47.0
-      - run: cargo build --locked --release --target x86_64-unknown-linux-musl
+      - run: sh scripts/build.sh x86_64-unknown-linux-musl build/co
       - run: |
-          version="$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -1)"
-          sh scripts/package-linux.sh "$version" x86_64-unknown-linux-musl target/x86_64-unknown-linux-musl/release/co dist
+          version="$(sh scripts/version.sh)"
+          sh scripts/package-linux.sh "$version" x86_64-unknown-linux-musl build/co dist
           sh scripts/test-packages.sh dist "$version"
 
   nix:
@@ -109,21 +109,22 @@ jobs:
       - run: ./result/bin/co version
 
   windows-packages:
-    needs: rust
+    needs: go
     runs-on: windows-2025
     timeout-minutes: 30
-    env:
-      RUSTFLAGS: -C target-feature=+crt-static
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-      - run: cargo build --locked --release --target x86_64-pc-windows-msvc
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - shell: bash
+        run: sh scripts/build.sh x86_64-pc-windows-msvc build/co.exe
       - name: Build and test the exact native Windows archive
         run: |
-          $version = (Select-String '^version = "([^"]+)"' Cargo.toml).Matches[0].Groups[1].Value
+          $version = (Select-String '^var Version = "([^"]+)"' internal/cli/version.go).Matches[0].Groups[1].Value
           python scripts/test-windows-packages.py
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
-          python scripts/windows-packages.py archive $version target/x86_64-pc-windows-msvc/release/co.exe $env:GITHUB_SHA dist
+          python scripts/windows-packages.py archive $version build/co.exe $env:GITHUB_SHA dist
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           ./scripts/test-windows-managers.ps1 -Version $version
       - if: always()

@@ -13,21 +13,19 @@ try {
     New-Item -ItemType Directory -Path $root | Out-Null
     & icacls $root /grant "${user}:(OI)(CI)F" | Out-Null
     if ($LASTEXITCODE) { throw 'Cannot grant test user its scratch directory' }
-    & cargo test --locked --no-run --message-format=json > "$root\build.jsonl"
+    & go build -mod=readonly -trimpath -o "$root\co.exe" ./cmd/co
+    if ($LASTEXITCODE) { throw 'Native Windows CLI compilation failed' }
+    & go test -mod=readonly -c -o "$root\cli.test.exe" ./internal/cli
     if ($LASTEXITCODE) { throw 'Native Windows test compilation failed' }
-    $executables = Get-Content "$root\build.jsonl" | ForEach-Object { $_ | ConvertFrom-Json } | Where-Object { $_.reason -eq 'compiler-artifact' -and $_.profile.test -and $_.executable } | ForEach-Object { $_.executable }
-    if (!$executables) { throw 'No native test executables found' }
-    $executables | ConvertTo-Json | Set-Content "$root\executables.json"
     $script = @'
 param($Root)
 $ErrorActionPreference = 'Stop'
 $env:TEMP = $Root
 $env:TMP = $Root
+$env:CO_TEST_GO_BINARY = "$Root\co.exe"
 try {
-    foreach ($binary in (Get-Content "$Root\executables.json" -Raw | ConvertFrom-Json)) {
-        & $binary
-        if ($LASTEXITCODE) { throw "Native test failed: $binary" }
-    }
+    & "$Root\cli.test.exe" -test.v -test.timeout=5m
+    if ($LASTEXITCODE) { throw 'Native Go tests failed' }
     exit 0
 } catch { Write-Error $_; exit 1 }
 '@
@@ -38,7 +36,7 @@ try {
     if ($process.ExitCode) { throw 'Standard-user Windows runtime tests failed' }
     # Prove a different Windows identity cannot read persisted credentials.
     $probe = Join-Path $root 'identity-probe'
-    $binary = (Resolve-Path 'target\debug\co.exe').Path
+    $binary = Join-Path $root 'co.exe'
     $env:CO_CONFIG_DIR = $probe
     & $binary logout
     if ($LASTEXITCODE) { throw 'Cannot create ACL probe' }

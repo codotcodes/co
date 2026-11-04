@@ -4,4 +4,7 @@
 *.tmp
 /dist
 /windows-metadata
+/build
+/co
+/co.exe
 __pycache__/

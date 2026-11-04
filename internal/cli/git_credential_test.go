@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -173,6 +174,9 @@ func TestAgentCredentialInputAndAPIBindingFailClosed(t *testing.T) {
 }
 
 func TestRealGitStopsBeforeHumanHelper(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix shell helper fixtures; native Windows managers verify helper chaining")
+	}
 	for _, binary := range contractBinaries(t) {
 		root := t.TempDir()
 		path := filepath.Join(root, "profile", "config.json")

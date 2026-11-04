@@ -11,7 +11,7 @@ machine runner. Help, version, usage and argument handling match the existing CL
 With Go 1.26 installed, build it with `go build -o /tmp/opencode/co-go ./cmd/co`.
 Workflow checking does not load credentials. Account commands use the existing
 profile and human session. There is no Rust fallback. Nix and
-`scripts/build.sh` build Go. CI and release workflow conversion is still pending.
+`scripts/build.sh`, CI and release workflows build Go.
 
 Go profile updates retain unknown fields and existing agent, machine and pending
 request records. Writes use a private temporary file and the shared config lock
@@ -95,7 +95,7 @@ Linux and macOS:
 curl -fsSL https://raw.githubusercontent.com/codotcodes/co/main/install.sh | sh
 ```
 
-See the [platform installation guide](docs/install.md) for Homebrew, Debian/Ubuntu, Fedora/RHEL, Arch Linux, Cargo, Nix, direct downloads, and upgrade/uninstall instructions. The installer supports Linux glibc/musl and macOS on x86_64 and ARM64, defaults to `~/.local/bin`, and verifies release checksums.
+See the [platform installation guide](docs/install.md) for Homebrew, Debian/Ubuntu, Fedora/RHEL, Arch Linux, source builds, Nix, direct downloads, and upgrade/uninstall instructions. The installer supports Linux glibc/musl and macOS on x86_64 and ARM64, defaults to `~/.local/bin`, and verifies release checksums.
 
 Windows x64 releases provide direct ZIP downloads and local installation with Scoop, WinGet and Chocolatey. Use v0.8.0 or newer for the Windows assets; v0.7.0 has none. Public package catalogs are pending publication. The installation guide covers checksum-verified release downloads and local package installation.
 
@@ -281,7 +281,7 @@ All release targets build without cgo or a C toolchain, including Windows.
 
 ## Releases
 
-Releases follow semantic versioning. A `vX.Y.Z` tag must match the package version. GitHub Actions builds the six Linux/macOS targets and Windows x64 (`x86_64-pc-windows-msvc`), publishes checksums and build attestations, and creates the GitHub release after automated checks. Windows manager metadata comes from the verified ZIP and records its exact source and binary hashes. Community catalog publication is a separate maintenance step; see the [release maintenance guide](docs/install.md#release-maintenance). Crates.io publication is enabled when the repository variable `PUBLISH_CRATES_IO` is `true` and `CARGO_REGISTRY_TOKEN` is configured.
+Releases follow semantic versioning. A `vX.Y.Z` tag must match `internal/cli/version.go`. GitHub Actions builds the six Linux/macOS targets and Windows x64 (`x86_64-pc-windows-msvc`), publishes checksums and build attestations, and creates the GitHub release after automated checks. Existing archive names are unchanged; all Linux builds are static. Windows manager metadata comes from the verified ZIP and records its exact source and binary hashes. Community catalog publication is a separate maintenance step; see the [release maintenance guide](docs/install.md#release-maintenance). New releases do not publish a Rust crate.
 
 ## Security
 

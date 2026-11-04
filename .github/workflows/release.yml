@@ -16,7 +16,12 @@ jobs:
       - uses: actions/checkout@v7
       - run: sh scripts/check-version.sh "$GITHUB_REF_NAME"
       - run: python3 scripts/test-release-notes.py
-      - run: cargo publish --locked --dry-run
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - run: go mod verify
+      - run: go test -race ./... -count=1
+      - run: go vet ./...
 
   build:
     needs: validate
@@ -42,25 +47,17 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
-      - name: Install musl toolchain
-        if: matrix.musl
-        run: sudo apt-get update && sudo apt-get install -y musl-tools
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-go@v6
         with:
-          targets: ${{ matrix.target }}
-      - name: Configure native musl linker
-        if: matrix.target == 'aarch64-unknown-linux-musl'
-        run: echo 'CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=musl-gcc' >> "$GITHUB_ENV"
-      - name: Preserve Apple Silicon macOS compatibility
-        if: matrix.target == 'aarch64-apple-darwin'
-        run: echo 'MACOSX_DEPLOYMENT_TARGET=14.0' >> "$GITHUB_ENV"
-      - run: cargo build --locked --release --target "${{ matrix.target }}"
+          go-version-file: go.mod
+      - run: go test -race ./... -count=1
+      - run: sh scripts/build.sh "${{ matrix.target }}" build/co
       - name: Package
         shell: bash
         run: |
           asset="co-${{ matrix.target }}.tar.gz"
           mkdir dist stage
-          cp "target/${{ matrix.target }}/release/co" stage/co
+          cp build/co stage/co
           cp README.md LICENSE-MIT LICENSE-APACHE stage/
           tar -C stage -czf "dist/$asset" .
           if command -v sha256sum >/dev/null 2>&1; then
@@ -68,15 +65,11 @@ jobs:
           else
             (cd dist && shasum -a 256 "$asset" > "$asset.sha256")
           fi
-      - uses: actions/setup-go@v6
-        if: matrix.musl
-        with:
-          go-version: stable
       - name: Build distribution packages
         if: matrix.musl
         run: |
           go install github.com/goreleaser/nfpm/v2/cmd/nfpm@v2.47.0
-          sh scripts/package-linux.sh "$GITHUB_REF_NAME" "${{ matrix.target }}" "target/${{ matrix.target }}/release/co" dist
+          sh scripts/package-linux.sh "$GITHUB_REF_NAME" "${{ matrix.target }}" build/co dist
           for package in dist/*.deb dist/*.rpm dist/*.pkg.tar.zst; do
             (cd dist && sha256sum "$(basename "$package")" > "$(basename "$package").sha256")
           done
@@ -108,7 +101,7 @@ jobs:
       - run: cd dist && sha256sum -c ./*.sha256
       - uses: actions/setup-go@v6
         with:
-          go-version: stable
+          go-version-file: go.mod
       - run: go install github.com/goreleaser/nfpm/v2/cmd/nfpm@v2.47.0
       - run: sh scripts/test-packages.sh dist "$GITHUB_REF_NAME"
 
@@ -116,23 +109,23 @@ jobs:
     needs: validate
     runs-on: windows-2025
     timeout-minutes: 30
-    env:
-      RUSTFLAGS: -C target-feature=+crt-static
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-go@v6
         with:
-          components: rustfmt, clippy
-          targets: x86_64-pc-windows-msvc
-      - run: cargo fmt --check
-      - run: cargo clippy --locked --all-targets -- -D warnings
+          go-version-file: go.mod
+      - name: Check formatting
+        shell: bash
+        run: test -z "$(gofmt -l cmd internal)"
+      - run: go vet ./...
       - run: ./scripts/test-windows.ps1
-      - run: cargo build --locked --release --target x86_64-pc-windows-msvc
+      - shell: bash
+        run: sh scripts/build.sh x86_64-pc-windows-msvc build/co.exe
       - name: Build checksum-bound Windows packages
         run: |
           python scripts/test-windows-packages.py
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
-          python scripts/windows-packages.py archive $env:GITHUB_REF_NAME target/x86_64-pc-windows-msvc/release/co.exe $env:GITHUB_SHA dist
+          python scripts/windows-packages.py archive $env:GITHUB_REF_NAME build/co.exe $env:GITHUB_SHA dist
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           python scripts/windows-packages.py manifests $env:GITHUB_REF_NAME dist windows-metadata
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
@@ -184,14 +177,3 @@ jobs:
       - run: gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --notes-file release-notes.md --title "co $GITHUB_REF_NAME"
         env:
           GH_TOKEN: ${{ github.token }}
-
-  crates-io:
-    needs: [build, package-smoke, windows]
-    if: vars.PUBLISH_CRATES_IO == 'true'
-    runs-on: blacksmith-4vcpu-ubuntu-2404
-    steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-      - run: cargo publish --locked
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}

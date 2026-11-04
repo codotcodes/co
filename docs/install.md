@@ -10,7 +10,7 @@ Requires `curl`, `tar`, `install`, and either `sha256sum` or `shasum`.
 curl -fsSL https://raw.githubusercontent.com/codotcodes/co/main/install.sh | sh
 ```
 
-The installer resolves the latest stable release once, verifies the archive's SHA-256 checksum, and atomically installs `co` in `~/.local/bin`. Rerun the same command to upgrade. A failed download or checksum check leaves the existing binary intact. Linux defaults to static musl binaries, which also work on older glibc distributions. Set `CO_LIBC=gnu` only if you specifically need the glibc build (built on Ubuntu 24.04).
+The installer resolves the latest stable release once, verifies the archive's SHA-256 checksum, and atomically installs `co` in `~/.local/bin`. Rerun the same command to upgrade. A failed download or checksum check leaves the existing binary intact. Linux defaults to the static `musl` archive name. Go releases also use static binaries under the existing `gnu` archive names; older Rust `gnu` builds require glibc from Ubuntu 24.04 or newer.
 
 Pin a version or choose a different directory:
 
@@ -95,7 +95,7 @@ Upgrade by downloading and verifying the new package, then running `pacman -U` a
 
 Windows installation is available from v0.8.0 through `co-x86_64-pc-windows-msvc.zip` and the selected package metadata. v0.7.0 contains no Windows assets. Public Scoop bucket, WinGet catalog and Chocolatey community entries are pending publication; the proposed identifiers below are not reserved. Release downloads and local manager installation do not require those entries.
 
-Use PowerShell and [Git for Windows](https://gitforwindows.org/) for Git commands. The release binary uses the static MSVC runtime. `install.sh` is the Linux/macOS installer.
+Use PowerShell and [Git for Windows](https://gitforwindows.org/) for Git commands. Go releases need no MSVC runtime. `install.sh` is the Linux/macOS installer.
 
 ### Select and verify release downloads
 
@@ -205,16 +205,16 @@ Remove-Item Env:CO_CONFIG_DIR
 
 Package removal preserves configuration. Run `co logout` before uninstalling to revoke the human session. `CO_AGENT_ID` continues to select only an agent's repository-scoped grant, with credential failures stopping lookup instead of falling back to the human session.
 
-## Cargo
+## Build from source
 
-Requires a Rust toolchain meeting the minimum version in `Cargo.toml`:
+From a checkout, use Go 1.26 or `nix develop`:
 
 ```sh
-cargo install --locked co-codes-cli
-co version
+go build -mod=readonly -trimpath -o co ./cmd/co
+./co version
 ```
 
-Ensure `~/.cargo/bin` is on `PATH` (`%USERPROFILE%\.cargo\bin` on Windows). Windows source builds require Rust's MSVC toolchain and Visual Studio C++ Build Tools. Use a crate release containing the Windows implementation; older published crates may not have it. Rerun `cargo install --locked co-codes-cli` to upgrade, or add `--version 0.3.0` to select a published crate version. Uninstall with `cargo uninstall co-codes-cli`. Crate publication is optional per release, so the newest GitHub release can precede crates.io availability.
+On Windows, use `-o co.exe` and run `.\co.exe version`. Copy the binary into a directory on `PATH`. Rebuild and replace it to upgrade; remove it to uninstall. No C or Rust toolchain is required. Previously published Rust crates remain historical releases, not an upgrade path for the Go CLI.
 
 ## Nix
 
@@ -249,7 +249,7 @@ Package removal does not remove your login configuration. Run `co logout` before
 
 ## Release maintenance
 
-The release tag must match `Cargo.toml`. The release workflow builds the six Linux/macOS archives plus the Windows x64 ZIP, packages both static Linux binaries with nFPM 2.47.0, emits per-file SHA-256 checksums and build attestations, and generates a version-pinned `co.rb` from verified archive checksums. Automated runtime and package-manager jobs gate release publication. Their definitions do not establish that a native run passed; retain the actual run URL, source OID and results for the release.
+The release tag must match `internal/cli/version.go`. The release workflow builds the six Linux/macOS archives plus the Windows x64 ZIP, packages both static Linux binaries with nFPM 2.47.0, emits per-file SHA-256 checksums and build attestations, and generates a version-pinned `co.rb` from verified archive checksums. Automated runtime and package-manager jobs gate release publication. Their definitions do not establish that a native run passed; retain the actual run URL, source OID and results for the release.
 
 After publishing a release, download its `co.rb` and update `Formula/co.rb` on the default branch as the tap's version update. Review its four versioned URLs and checksums against that release. Homebrew users receive that version through `brew update` after the change is merged. To regenerate locally from downloaded archives and checksum files:
 
@@ -261,7 +261,7 @@ Keep this formula at the latest published version, not an unreleased package ver
 
 ### Windows artifacts and catalogs
 
-The Windows job builds on `windows-2025` with `RUSTFLAGS=-C target-feature=+crt-static`. `scripts/windows-packages.py archive` executes the native binary's `version` command, checks the x64 PE header, and embeds `co-release.json`. `manifests` derives all managers' versioned URL and ZIP SHA-256 from the verified archive. The release attaches these files, each with a `.sha256`:
+The Windows job builds on `windows-2025` with Go and cgo disabled. `scripts/windows-packages.py archive` executes the native binary's `version` command, checks the x64 PE header, and embeds `co-release.json`. `manifests` derives all managers' versioned URL and ZIP SHA-256 from the verified archive. The release attaches these files, each with a `.sha256`:
 
 | Asset                           | Purpose                                                                             |
 | ------------------------------- | ----------------------------------------------------------------------------------- |
