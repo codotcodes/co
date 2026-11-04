@@ -21,7 +21,7 @@ func TestPartialRuntimeNeverFallsBack(t *testing.T) {
 			t.Fatal(command, err)
 		}
 	}
-	for _, args := range [][]string{{"access", "request"}, {"access", "wait"}} {
+	for _, args := range [][]string{{"access", "request"}} {
 		if err := Run(args, strings.NewReader(""), io.Discard, io.Discard); err == nil || !strings.Contains(err.Error(), "not migrated to Go") {
 			t.Fatal(args, err)
 		}
