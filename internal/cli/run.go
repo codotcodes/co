@@ -26,6 +26,7 @@ const partialHelp = `co: partial Go migration
   repo create [opts] <repo>  create a repository
   clone [opts] <repo> [dir]  clone with repository-scoped credentials
   link [opts] <repo>      configure a local repository remote
+  secret set [opts] <name>  create or replace a workflow secret
   version                 print version
 
 Other commands still require the Rust CLI. This binary never falls back to it.`
@@ -36,6 +37,8 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 		command = args[0]
 	}
 	switch command {
+	case "secret":
+		return secretCommand(args[1:], stdin, stdout)
 	case "clone", "link":
 		return repositoryGit(args[1:], command == "clone", stdin, stdout, stderr)
 	case "repo":
