@@ -16,7 +16,7 @@ func TestWorkflowArguments(t *testing.T) {
 }
 
 func TestPartialRuntimeNeverFallsBack(t *testing.T) {
-	if err := Run([]string{"machine", "run", "fixture"}, strings.NewReader(""), io.Discard, io.Discard); err == nil || !strings.Contains(err.Error(), "not migrated to Go") {
+	if err := Run([]string{"unknown-unported"}, strings.NewReader(""), io.Discard, io.Discard); err == nil || !strings.Contains(err.Error(), "not migrated to Go") {
 		t.Fatal(err)
 	}
 	var output bytes.Buffer

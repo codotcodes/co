@@ -41,7 +41,7 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 	}
 	switch command {
 	case "machine":
-		return machineCommand(args[1:], stdin, stdout)
+		return machineCommand(args[1:], stdin, stdout, stderr)
 	case "doctor":
 		return doctor(stdout)
 	case "deployment":

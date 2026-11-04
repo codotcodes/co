@@ -33,3 +33,5 @@ func openRunnerLock(path string) (*os.File, error) {
 	}
 	return file, nil
 }
+
+func openRunnerEnrollmentLock(path string) (*os.File, error) { return openRunnerLock(path) }

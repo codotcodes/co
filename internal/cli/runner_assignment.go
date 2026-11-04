@@ -195,6 +195,10 @@ func validRunnerAssignment(job runnerAssignment, apiOrigin string) bool {
 	if !validAgentIdentity(agentIdentity{ID: job.ID, Name: "job"}) {
 		return false
 	}
+	private := append([]string{job.Token}, job.SecretValues...)
+	if privateJSON(job.ID, private) {
+		return false
+	}
 	for _, character := range []byte(job.CommitOID) {
 		if !(character >= '0' && character <= '9' || character >= 'a' && character <= 'f') {
 			return false
@@ -202,6 +206,9 @@ func validRunnerAssignment(job runnerAssignment, apiOrigin string) bool {
 	}
 	totalFiles := uint64(0)
 	for _, step := range job.Steps {
+		if privateJSON(step.Name, private) {
+			return false
+		}
 		if step.Cache && !step.GitHub || len(step.Run) > 65_536 || strings.ContainsRune(step.Run, 0) || step.Shell != nil && *step.Shell != "sh" && *step.Shell != "bash" {
 			return false
 		}

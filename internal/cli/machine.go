@@ -63,7 +63,7 @@ func parseMachineEnroll(args []string) (machineEnrollCommand, error) {
 	return command, nil
 }
 
-func machineCommand(args []string, stdin io.Reader, stdout io.Writer) error {
+func machineCommand(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 	if len(args) == 0 {
 		return errors.New(machineUsage)
 	}
@@ -92,8 +92,8 @@ func machineCommand(args []string, stdin io.Reader, stdout io.Writer) error {
 	case args[0] == "heartbeat" && len(args) == 2:
 		_, err := heartbeatMachine(ctx, args[1])
 		return err
-	case args[0] == "run":
-		return errors.New("machine run is not migrated to Go; use the retained Rust CLI")
+	case args[0] == "run" && len(args) == 2:
+		return runConnectedMachine(ctx, args[1], stderr)
 	default:
 		return errors.New(machineUsage)
 	}

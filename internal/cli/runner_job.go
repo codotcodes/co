@@ -25,6 +25,9 @@ func finishRunnerJob(ctx context.Context, machine machineIdentity, job runnerAss
 	if !validAgentIdentity(agentIdentity{ID: job.ID, Name: "job"}) || !cleanCredential(job.Token) {
 		return errors.New("invalid job assignment")
 	}
+	if privateJSON(job.ID, append([]string{machine.Credential, job.Token}, job.SecretValues...)) {
+		return errors.New("invalid job assignment")
+	}
 	if steps == nil {
 		steps = []runnerStepResult{}
 	}

@@ -124,4 +124,11 @@ func TestRunnerAssignmentRejectsCredentialAndPathAmbiguity(t *testing.T) {
 	if validRunnerAssignment(job, "https://api.co.codes") {
 		t.Fatal("unsafe assignment credential accepted")
 	}
+	job.Token = "assignment"
+	job.Environment = map[string]string{"TOKEN": "private-value"}
+	job.SecretValues = []string{"private-value"}
+	job.Steps = []runnerStep{{Name: "private-value", Run: "true"}}
+	if validRunnerAssignment(job, "https://api.co.codes") {
+		t.Fatal("step metadata could expose a private environment value")
+	}
 }

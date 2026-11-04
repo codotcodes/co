@@ -18,6 +18,12 @@ import (
 const fixturePodman = `#!/usr/bin/env python3
 import hashlib,json,os,pathlib,subprocess,sys,time
 args=sys.argv[1:]
+if args[0]=='rm':
+ if os.environ.get('CO_STEP_CLEAN'):
+  with open(os.environ['CO_STEP_CLEAN'],'a') as output:output.write(json.dumps(args)+'\n')
+ sys.exit(0)
+if args[0]=='image':
+ print('1' if os.environ['CO_STEP_CASE']=='cache' else '0');sys.exit(0)
 if args[0]=='info':
  print('false' if os.environ['CO_STEP_CASE']=='no-network' else 'true');sys.exit(0)
 if args[0]=='stop':
