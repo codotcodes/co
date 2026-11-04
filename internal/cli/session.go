@@ -31,6 +31,10 @@ type apiCredential struct {
 }
 
 func requestAPI(ctx context.Context, api, method, path string, credential *apiCredential, body any) (*http.Response, error) {
+	return requestAPIHeaders(ctx, api, method, path, credential, body, nil)
+}
+
+func requestAPIHeaders(ctx context.Context, api, method, path string, credential *apiCredential, body any, headers map[string]string) (*http.Response, error) {
 	var input io.Reader
 	if body != nil {
 		data, err := json.Marshal(body)
@@ -50,6 +54,9 @@ func requestAPI(ctx context.Context, api, method, path string, credential *apiCr
 		request.Header.Set("Content-Type", "application/json")
 	}
 	request.Header.Set("User-Agent", "co/"+Version)
+	for key, value := range headers {
+		request.Header.Set(key, value)
+	}
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.DisableKeepAlives = true
 	defer transport.CloseIdleConnections()

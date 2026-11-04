@@ -18,6 +18,7 @@ const partialHelp = `co: partial Go migration
   git-credential <op>      serve scoped Git credentials
   access view <repo>       read a repository using an agent grant
   access wait [request]   wait for a saved access request
+  access request [opts] <repo>  request human-approved agent access
   agent register <name>   register a local agent identity
   agent list              list local agent identities
   agent attest <repo> <oid>...  attest explicitly selected commits
@@ -32,13 +33,16 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 	}
 	switch command {
 	case "access":
+		if len(args) >= 2 && args[1] == "request" {
+			return requestAgentAccess(args[2:], stdin, stdout, stderr)
+		}
 		if len(args) >= 2 && args[1] == "wait" {
 			return waitAgentAccess(args[2:], stdout, stderr)
 		}
 		if len(args) == 3 && args[1] == "view" {
 			return agentRepositoryView(args[2], stdout)
 		}
-		return fmt.Errorf("access command is not migrated to Go except `co access view <owner/repo>`")
+		return fmt.Errorf("usage: co access request [options] <owner/repo> | co access wait [request-id] | co access view <owner/repo>")
 	case "agent":
 		if len(args) == 3 && args[1] == "register" {
 			return registerAgent(args[2], stdout)

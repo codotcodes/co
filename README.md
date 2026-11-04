@@ -49,7 +49,11 @@ API. `access wait` resumes saved requests using only their poll credential,
 honors retry delays and atomically stores approved grants. Cancelled waits retain
 their pending request; expired, denied and approved requests are removed. Late
 approvals and concurrent replacement of requests or grants cannot publish stale
-credentials. Access request creation remains unported.
+credentials. `access request` resolves an explicit or unique local agent, reuses
+matching pending submissions and saves a capability and idempotency key before
+sending a request. After an uncertain response, rerunning the same command uses
+the original key and payload. Browser handoff and approval waiting use the same
+private pending-request storage as `access wait`.
 
 Run `go test -race ./...` and `go vet ./...` for the Go code. Set
 `CO_TEST_RUST_BINARY` and `CO_TEST_GO_BINARY` to frozen compiled binaries for
