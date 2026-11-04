@@ -7,6 +7,8 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+
+	"golang.org/x/sys/unix"
 )
 
 func machineRAMMiB() (uint64, error) {
@@ -32,18 +34,13 @@ func machineRAMMiB() (uint64, error) {
 
 func machineCPUCount() int {
 	cpus := runtime.NumCPU()
-	if data, err := os.ReadFile("/sys/fs/cgroup/cpu.max"); err == nil {
-		fields := strings.Fields(string(data))
-		if len(fields) == 2 {
-			quota, qerr := strconv.ParseUint(fields[0], 10, 64)
-			period, perr := strconv.ParseUint(fields[1], 10, 64)
-			if qerr == nil && perr == nil && period > 0 {
-				bounded := quota/period + min(quota%period, 1)
-				if bounded < uint64(cpus) {
-					cpus = int(max(1, bounded))
-				}
-			}
-		}
+	var affinity unix.CPUSet
+	if err := unix.SchedGetaffinity(0, &affinity); err == nil && affinity.Count() > 0 {
+		cpus = affinity.Count()
 	}
-	return cpus
+	cpuLimit, _ := runnerCgroupLimits()
+	if cpuLimit > 0 && cpuLimit < uint64(cpus) {
+		cpus = int(cpuLimit)
+	}
+	return max(1, cpus)
 }
