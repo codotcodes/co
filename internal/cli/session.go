@@ -18,6 +18,19 @@ func sessionRequest(config configuration, method, path, token string) (*http.Res
 }
 
 func apiRequest(ctx context.Context, api, method, path string, token *string, body any) (*http.Response, error) {
+	var credential *apiCredential
+	if token != nil {
+		credential = &apiCredential{scheme: "Bearer", secret: *token}
+	}
+	return requestAPI(ctx, api, method, path, credential, body)
+}
+
+type apiCredential struct {
+	scheme, secret string
+	scoped         bool
+}
+
+func requestAPI(ctx context.Context, api, method, path string, credential *apiCredential, body any) (*http.Response, error) {
 	var input io.Reader
 	if body != nil {
 		data, err := json.Marshal(body)
@@ -30,8 +43,8 @@ func apiRequest(ctx context.Context, api, method, path string, token *string, bo
 	if err != nil {
 		return nil, errors.New("network request failed: invalid API URL")
 	}
-	if token != nil {
-		request.Header.Set("Authorization", "Bearer "+*token)
+	if credential != nil && credential.scheme != "" {
+		request.Header.Set("Authorization", credential.scheme+" "+credential.secret)
 	}
 	if body != nil {
 		request.Header.Set("Content-Type", "application/json")
@@ -41,6 +54,9 @@ func apiRequest(ctx context.Context, api, method, path string, token *string, bo
 	transport.DisableKeepAlives = true
 	defer transport.CloseIdleConnections()
 	client := &http.Client{Transport: transport, Timeout: 30 * time.Second, CheckRedirect: func(next *http.Request, via []*http.Request) error {
+		if credential != nil && credential.scoped {
+			return errors.New("scoped credential redirect refused")
+		}
 		if len(via) >= 10 {
 			return errors.New("too many redirects")
 		}
@@ -81,6 +97,7 @@ func sameAPIOrigin(left, right *url.URL) bool {
 func decodeSessionResponse(response *http.Response) (any, error) {
 	defer response.Body.Close()
 	decoder := json.NewDecoder(response.Body)
+	decoder.UseNumber()
 	var body any
 	err := decoder.Decode(&body)
 	if err == nil {

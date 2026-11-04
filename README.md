@@ -7,7 +7,7 @@ The CLI supports browser-based device login, account inspection, human-approved 
 ## Go migration
 
 The Go implementation currently supports `login`, `workflow check`, `version`,
-`whoami` and `logout`.
+`whoami`, `logout` and `git-credential`.
 With Go 1.26 installed, build it with `go build -o /tmp/opencode/co-go ./cmd/co`.
 Workflow checking does not load credentials. Account commands use the existing
 profile and human session; unsupported commands never fall back to Rust.
@@ -29,6 +29,13 @@ the session or API binding during approval, login refuses to overwrite it.
 Use a separate `CO_CONFIG_DIR` to log in to another API when the profile already
 contains agent, pending-request, grant or machine records.
 Verification URLs must use HTTP(S) without embedded credentials.
+
+The Go Git helper mints a fresh token for the selected agent's live push grant,
+repository and API. Agent failures return `quit=true` so Git cannot try a human
+credential helper. Other API profiles need their own explicit `api_url` binding;
+legacy profiles with custom API overrides and no binding fail closed. Clone/link
+and grant-request commands still use Rust and do not configure this partial
+binary automatically.
 
 Run `go test -race ./...` and `go vet ./...` for the Go code. Set
 `CO_TEST_RUST_BINARY` and `CO_TEST_GO_BINARY` to frozen compiled binaries for

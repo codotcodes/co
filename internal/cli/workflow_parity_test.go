@@ -19,13 +19,17 @@ type observation struct {
 }
 
 func invoke(t *testing.T, binary, root string, args, extraEnv []string) observation {
+	return invokeInput(t, binary, root, args, extraEnv, []byte("unchanged stdin\n"))
+}
+
+func invokeInput(t *testing.T, binary, root string, args, extraEnv []string, input []byte) observation {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
 	defer cancel()
 	command := exec.CommandContext(ctx, binary, args...)
 	command.Dir = root
 	command.Env = append([]string{"HOME=" + root, "CO_CONFIG_DIR=" + filepath.Join(root, "must-not-load"), "CO_API_URL=http://127.0.0.1:1", "PATH=" + os.Getenv("PATH")}, extraEnv...)
-	command.Stdin = strings.NewReader("unchanged stdin\n")
+	command.Stdin = bytes.NewReader(input)
 	var stdout, stderr bytes.Buffer
 	command.Stdout, command.Stderr = &stdout, &stderr
 	err := command.Run()

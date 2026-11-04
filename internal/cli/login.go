@@ -8,14 +8,12 @@ import (
 	"fmt"
 	"io"
 	"math"
-	"net/http"
 	"os"
 	"os/signal"
 	"strconv"
 	"strings"
 	"syscall"
 	"time"
-	"unicode/utf8"
 )
 
 const deviceExpired = "device code expired; run `co login` again"
@@ -49,23 +47,6 @@ func deviceSeconds(value uint64) time.Duration {
 		return time.Duration(math.MaxInt64)
 	}
 	return time.Duration(value) * time.Second
-}
-
-func deviceRecord(response *http.Response, fields []string, prefix string) (configuration, error) {
-	defer response.Body.Close()
-	data, err := io.ReadAll(response.Body)
-	if err != nil || !utf8.Valid(data) || !validConfigUnicode(data) || !json.Valid(data) {
-		return nil, fmt.Errorf("%s: invalid JSON", prefix)
-	}
-	decoder := json.NewDecoder(bytes.NewReader(data))
-	if err := uniqueJSON(decoder); err != nil {
-		return nil, fmt.Errorf("%s: invalid JSON", prefix)
-	}
-	record, err := configObject(data, fields)
-	if err != nil {
-		return nil, fmt.Errorf("%s: expected record", prefix)
-	}
-	return record, nil
 }
 
 func optionalDeviceSeconds(record configuration, name string, fallback uint64) (uint64, error) {
@@ -115,7 +96,7 @@ func deviceLogin(ctx context.Context, stdout io.Writer, run loginRuntime) (resul
 		_, err := decodeSessionResponse(response)
 		return err
 	}
-	code, err := deviceRecord(response, []string{"device_code", "user_code", "verification_uri", "verification_uri_complete", "expires_in", "interval"}, "invalid API response")
+	code, err := apiRecord(response, []string{"device_code", "user_code", "verification_uri", "verification_uri_complete", "expires_in", "interval"}, "invalid API response")
 	if err != nil {
 		return err
 	}
@@ -182,7 +163,7 @@ func deviceLogin(ctx context.Context, stdout io.Writer, run loginRuntime) (resul
 			return err
 		}
 		if response.StatusCode >= 200 && response.StatusCode < 300 {
-			token, err := deviceRecord(response, []string{"access_token"}, "invalid token response")
+			token, err := apiRecord(response, []string{"access_token"}, "invalid token response")
 			if err != nil {
 				return err
 			}
@@ -214,7 +195,7 @@ func deviceLogin(ctx context.Context, stdout io.Writer, run loginRuntime) (resul
 			_, err = fmt.Fprintln(stdout, "Authorized. Run `co whoami` to verify this machine.")
 			return err
 		}
-		poll, err := deviceRecord(response, []string{"error", "error_description", "message"}, "invalid API response")
+		poll, err := apiRecord(response, []string{"error", "error_description", "message"}, "invalid API response")
 		if err != nil {
 			poll = configuration{"error": json.RawMessage(`"server_error"`)}
 		}
