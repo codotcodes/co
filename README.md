@@ -6,16 +6,13 @@ The CLI supports browser-based device login, account inspection, human-approved 
 
 ## Go migration
 
-The Go implementation currently supports `login`, `workflow check`, `version`,
-`whoami`, `logout`, `git-credential`, `access view`, `access wait`, `agent register`,
-`agent list`, `agent attest`, `repo view`, `repo create`, `clone`, `link` and
-`secret set`, `deployment`, `doctor`, `machine enroll`, `machine list` and
-`machine heartbeat` and `machine run`.
+All CLI command groups now have Go implementations, including the connected
+machine runner. Help, version, usage and argument handling match the existing CLI.
 With Go 1.26 installed, build it with `go build -o /tmp/opencode/co-go ./cmd/co`.
 Workflow checking does not load credentials. Account commands use the existing
-profile and human session; unsupported commands never fall back to Rust.
-Its help identifies the partial command set. Release packaging, Nix packages and
-the default CLI still use Rust until the remaining command groups are migrated.
+profile and human session. There is no Rust fallback. Release packaging, Nix
+packages and default build wrappers still use Rust until their replacement
+checks finish.
 
 Go profile updates retain unknown fields and existing agent, machine and pending
 request records. Writes use a private temporary file and the shared config lock
@@ -37,8 +34,7 @@ The Go Git helper mints a fresh token for the selected agent's live push grant,
 repository and API. Agent failures return `quit=true` so Git cannot try a human
 credential helper. Other API profiles need their own explicit `api_url` binding;
 legacy profiles with custom API overrides and no binding fail closed. Clone/link
-and grant-request commands still use Rust and do not configure this partial
-binary automatically.
+configure the invoked binary's stable installation path as the Git helper.
 
 `access view` uses a live pull grant and honors `CO_AGENT_ID` when set. It omits
 the token-bearing self URL and refuses documents containing private credentials.
