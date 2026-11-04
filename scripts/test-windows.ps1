@@ -24,7 +24,7 @@ $env:TEMP = $Root
 $env:TMP = $Root
 $env:CO_TEST_GO_BINARY = "$Root\co.exe"
 try {
-    & "$Root\cli.test.exe" -test.v -test.timeout=5m
+    & "$Root\cli.test.exe" '-test.v' '-test.timeout=5m'
     if ($LASTEXITCODE) { throw 'Native Go tests failed' }
     exit 0
 } catch { Write-Error $_; exit 1 }
